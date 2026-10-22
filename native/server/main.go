@@ -1027,14 +1027,30 @@ func main() {
 		}
 	}()
 
-	portNumber := *port
-	address := net.JoinHostPort(*host, strconv.Itoa(portNumber))
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		// 端口被占用（如默认 8000 已被别的程序占用）时不直接崩溃：
-		// 交互式启动提示用户输入新端口；无标准输入（双击 exe / 服务方式）时
-		// 输入流立即结束，自动顺延探测可用端口，让本地服务总能起来。
-		fmt.Printf("\n端口 %d 无法监听（%v），可能已被占用。\n", portNumber, err)
+	// 绑定成功不等于「主页真的能打开」：Windows 上 0.0.0.0:<port> 绑定成功，
+	// 但 127.0.0.1:<port> 完全可能已被别的程序占着（如 WorkBuddy 占了 8000），
+	// 此时浏览器打开 http://127.0.0.1:<port>/web/ 会被那个程序接走、主页打不开。
+	// 所以下面先起服务、再真正发一次请求自检验证，验证不过就提示更换端口。
+	probeHost := *host
+	if probeHost == "" || probeHost == "0.0.0.0" || probeHost == "::" {
+		probeHost = "127.0.0.1"
+	}
+	probeClient := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second}
+	probeHome := func(portNumber int) bool {
+		response, err := probeClient.Get("http://" + net.JoinHostPort(probeHost, strconv.Itoa(portNumber)) + "/web/")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return false
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		// 必须确认拿到的是本服务的页面（含 <main id="view">），
+		// 而不是另一个程序在同一端口上返回的内容。
+		return readErr == nil && strings.Contains(string(body), `id="view"`)
+	}
+	choosePort := func(startFrom int) int {
 		chosen := 0
 		fmt.Print("请输入要使用的端口（直接回车将自动选择可用端口）：")
 		if line, readErr := bufio.NewReader(os.Stdin).ReadString('\n'); readErr == nil {
@@ -1046,42 +1062,66 @@ func main() {
 			}
 		}
 		if chosen == 0 {
-			probed, probeErr := nextAvailablePort(*host, portNumber)
+			probed, probeErr := nextAvailablePort(*host, startFrom)
 			if probeErr != nil {
-				log.Fatalf("无法在 %s 上找到可用端口：%v", *host, probeErr)
+				log.Fatalf("无法在 %s 上找到可用端口：%v", *host, startFrom)
 			}
 			chosen = probed
 			fmt.Printf("自动选择可用端口 %d。\n", chosen)
 		}
-		portNumber = chosen
-		*port = portNumber
-		address = net.JoinHostPort(*host, strconv.Itoa(portNumber))
-		listener, err = net.Listen("tcp", address)
+		return chosen
+	}
+
+	portNumber := *port
+	for {
+		address := net.JoinHostPort(*host, strconv.Itoa(portNumber))
+		listener, err := net.Listen("tcp", address)
 		if err != nil {
-			log.Fatalf("无法监听 %s：%v", address, err)
+			// 端口被占用（如默认 8000 已被别的程序占用）时不直接崩溃：
+			// 交互式启动提示用户输入新端口；无标准输入（双击 exe / 服务方式）时
+			// 输入流立即结束，自动顺延探测可用端口，让本地服务总能起来。
+			fmt.Printf("\n端口 %d 无法监听（%v），可能已被占用，请更换端口。\n", portNumber, err)
+			portNumber = choosePort(portNumber + 1)
+			*port = portNumber
+			continue
 		}
-	}
-	fmt.Println()
-	fmt.Printf("%s %s 本地服务已启动\n", editionName(), appVersion)
-	fmt.Println("浏览器打开下面任一地址即可使用：")
-	for _, item := range lanAddresses(*port) {
-		fmt.Printf("  http://%s/web/\n", item)
-	}
-	fmt.Printf("数据目录：%s\n", directory)
-	// 加密的 H.265 站源（如红果）必须靠 ffmpeg 转码才能在浏览器里播放。
-	if binary := ffmpegPath(); binary != "" {
-		fmt.Printf("已检测到 ffmpeg：%s（加密/HEVC 站源将自动转码播放）\n", binary)
-	} else {
-		fmt.Println("未检测到 ffmpeg：红果等加密站源无法在浏览器播放，")
-		fmt.Println("  安装 ffmpeg 后放到本目录或加入 PATH 并重启即可，其余站源不受影响。")
-	}
-	fmt.Println("关闭本窗口或按 Ctrl+C 停止服务。")
-	fmt.Println()
-	if *open {
-		openBrowser(fmt.Sprintf("http://127.0.0.1:%d/web/", *port))
-	}
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
-	if err := server.Serve(listener); err != nil {
-		log.Fatalf("本地服务已停止：%v", err)
+		server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		serveErr := make(chan error, 1)
+		go func() {
+			serveErr <- server.Serve(listener)
+		}()
+		if !probeHome(portNumber) {
+			_ = server.Close()
+			_ = listener.Close()
+			fmt.Printf("\n端口 %d 已启动，但主页无法访问（http://%s/web/）：\n", portNumber, net.JoinHostPort(probeHost, strconv.Itoa(portNumber)))
+			fmt.Printf("%s:%d 很可能被别的程序占用，浏览器会被它接走，请更换端口。\n", probeHost, portNumber)
+			portNumber = choosePort(portNumber + 1)
+			*port = portNumber
+			continue
+		}
+		*port = portNumber
+		fmt.Println()
+		fmt.Printf("%s %s 本地服务已启动\n", editionName(), appVersion)
+		fmt.Println("浏览器打开下面任一地址即可使用：")
+		for _, item := range lanAddresses(*port) {
+			fmt.Printf("  http://%s/web/\n", item)
+		}
+		fmt.Printf("数据目录：%s\n", directory)
+		// 加密的 H.265 站源（如红果）必须靠 ffmpeg 转码才能在浏览器里播放。
+		if binary := ffmpegPath(); binary != "" {
+			fmt.Printf("已检测到 ffmpeg：%s（加密/HEVC 站源将自动转码播放）\n", binary)
+		} else {
+			fmt.Println("未检测到 ffmpeg：红果等加密站源无法在浏览器播放，")
+			fmt.Println("  安装 ffmpeg 后放到本目录或加入 PATH 并重启即可，其余站源不受影响。")
+		}
+		fmt.Println("关闭本窗口或按 Ctrl+C 停止服务。")
+		fmt.Println()
+		if *open {
+			openBrowser(fmt.Sprintf("http://127.0.0.1:%d/web/", *port))
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("本地服务已停止：%v", err)
+		}
+		return
 	}
 }
