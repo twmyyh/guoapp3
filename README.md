@@ -2,9 +2,25 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.7+100（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.0+101（未验证开发快照）**。
 
-本轮（1.4.7+100）继续追 **Windows 桌面端「播放几秒后开始卡顿」**：上一轮（1.4.4+97）清掉 d3d11vpp 与 verbose 日志后，用户实测仍比 guoappxxx 编译版卡。这一轮不再猜参数，而是把两个项目从依赖锁、Windows runner、播放器页面、弹幕层、Go 流代理逐层对齐，把差异逐条消掉。共三处，其中第一处正是上一轮自己引入的回归。
+本轮（1.5.0+101）换掉整个播放器实现：**完整移植 guoappxxx 的播放器，删除双播放器选择**。1.4.4~1.4.7 三轮都是在保留本项目播放器的前提下逐项对齐参数，用户实测装包后 Windows 仍然「声音正常、画面跳帧」，两个播放器都卡——说明差异不在某条 mpv 参数，而在播放器整体实现（解码供帧、恢复阶梯、控件与合成层）。因此这一轮不再做参数对齐，而是直接把 guoappxxx 的播放器代码搬到本项目。
+
+1. **播放器整体替换**。`lib/player_screen.dart`、`player_controls.dart`、`player_interactions.dart`、`player_menu.dart`、`television_controls.dart` 用 guoappxxx 版本覆盖，并补入其依赖 `diary_service.dart`（播放日记）、`playback_diagnostics.dart`（会话与地址脱敏）。移植后 `player_screen.dart` 与参照版逐行 diff，只剩本项目需要的四处差异：去广告标志透传、长按倍速取用户偏好、`_storedPreferences` 快照、以及去掉从未被实例化的 LunaExo 分支。media_kit / libmpv / `Video` 组件的配置因此与参照版完全一致。
+
+2. **去掉播放器选择与 xigua 点播播放器**。播放路由只返回 `PlayerScreen`；首页下拉菜单与溢出菜单里的「播放器选择」入口删除，`PlayerPickerScreen` 从 `player_picker.dart` 移除，`lib/xigua/xigua_player_screen.dart` 删除。`lib/xigua/` 下直播共用的控件、交互、统计等文件保留（`live_player_screen.dart` 仍在用）。直播播放器与本地 Web 服务版播放器不在本次范围内，未改动。
+
+3. **保留去广告**。`PlaybackPreferences.adBlock` 仍然随 `PlaybackLoader.load` / `PlaybackPreloader.prepare` 传到核心解析接口（`repository.resolve/resolveOnline`），开关在播放菜单「播放设置」里补回（本地播放时禁用）。切换开关会 `_preloader.clear()` 并重建当前播放会话，让核心按新标志重新清洗；这一点参照版没有，属于本项目保留的能力。
+
+4. **保留左侧长按滑动调亮度**。手势层仍按落点分左右：左 35% 区域进入亮度模式（`AppDevice.getBrightness/setBrightness` 走 Android 窗口级 `screenBrightness` 覆盖，不动系统设置），其余区域是刷剧切集，不调音量；退出播放页 `resetBrightness` 复位。亮度 HUD 由参照版的中央浮层渲染（图标 + 进度条 + 百分比）。
+
+5. **恢复沉浸式手势反馈**。参照版的 `_interactionChanged` 是「有任何提示就唤出控制条」，本项目补回 `feedbackRevealsControls`：长按快进、切集、亮度这类提示只在画面中央留一行字，长按期间控制条强制退让；只有快进/后退、音量这类提示才唤出控制条。
+
+6. **随旧播放器下线的模块**。`picture_quality_ui.dart`、`picture_quality_applier.dart`（旧播放器的「画质档」面板与 `unsharp` CPU 滤镜应用器）、`windows_playback_tuning.dart`（上一轮的 Windows mpv 参数收敛，参照版不需要）、`xigua/player_menu.dart`（只被已删除的 xigua 播放页引用）一并删除。`playback_preferences` 里的 `pictureQuality` 字段保留，避免老版本存档解析失败。
+
+验证：`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning。`test/player_screen_test.dart` 按新契约重写 8 例——恢复阶梯（重复错误只刷新一次、刷新 → 备用线路 → 停止、备用线路请求延迟返回时必须丢弃）、长按快进（先让控制条按 4 秒超时退场再长按，2 倍速生效、松开恢复、提示 1.2 秒后消失）、桌面端空闲隐藏 / 鼠标唤出 / 空格暂停 / 方向键回退、手动切集保持可见。播放相关 4 个测试文件共 19 例全绿。全量 `flutter test` 与 HEAD 基线对照：基线 32 例失败、本轮 28 例失败，失败的用例集合是本轮的子集（`widget_test`/`interface_test`/`media_library_test`/`television_player_test` 等既有失败与播放器无关，另 4 例由新播放器顺带修好），无新增失败。本机无 MSVC，Windows 包由 CI 构建，真机是否仍卡需装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.7+100）继续追 **Windows 桌面端「播放几秒后开始卡顿」**：上一轮（1.4.4+97）清掉 d3d11vpp 与 verbose 日志后，用户实测仍比 guoappxxx 编译版卡。这一轮不再猜参数，而是把两个项目从依赖锁、Windows runner、播放器页面、弹幕层、Go 流代理逐层对齐，把差异逐条消掉。共三处，其中第一处正是上一轮自己引入的回归。
 
 1. **`framedrop=vo` 泄漏到了 Windows（上一轮的回归）**（`lib/windows_playback_tuning.dart`、`lib/xigua/xigua_player_screen.dart`）。`framedrop=vo` 的语义是「渲染稍跟不上就直接丢帧」，这是 Android TV 硬解带宽受限时才该用的策略——guoappxxx 也只把它写在 `Platform.isAndroid` 分支里，Windows 从不设（mpv 默认 `framedrop=no`，宁可平滑延迟也不跳帧）。上一轮把 `framedrop=vo` 和 `video-sync=audio` 提到了公共段，Windows 也跟着开了，于是渲染稍有压力就持续丢帧，观感就是「画面一顿一顿」。更隐蔽的是 xigua 播放器：它有一张不分平台的手机端参数表（预读压到 1 秒、`framedrop=vo`、`hr-seek-framedrop=yes`），Windows 分支虽然随后调了统一调优，但当时那套调优并不覆盖 `framedrop`，等于把丢帧留在了进程里（libmpv 是进程内单实例，属性带记忆，切播放器还会互相污染）。现在：Windows 统一调优显式写回 `framedrop=no`；xigua 的 `cache-secs`/`demuxer-readahead-secs`/`framedrop`/`hr-seek-framedrop` 四项限定在非 Windows 生效。
 

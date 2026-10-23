@@ -175,7 +175,15 @@ VideoEnhancementDecision chooseVideoEnhancement({
   final maxPixels = android || television ? 2073600.0 : 8294400.0;
   final maxDimension = android || television ? 4096.0 : 8192.0;
   final scale = math.min(
-    targetScale,
+    // Windows 桌面端一律不放大输出尺寸。
+    //
+    // 桌面走 `vo=libmpv`：mpv 渲染到一个 FBO，media_kit 再把这块纹理交给
+    // Flutter 合成。输出尺寸一旦从 1080p 放大到 2160p，每帧要经 ANGLE
+    // 回传并上传 4 倍像素量（1080p 每帧约 8MB，2160p 约 33MB），
+    // 60Hz 下就是每秒 2GB 级别的搬运，GPU 与显存带宽很快见底，
+    // 于是视频输出跟不上音频时钟——声音正常、画面跳帧。
+    // 桌面窗口本身就够大，交给 Flutter 在最终合成时缩放即可。
+    windows ? 1.0 : targetScale,
     math.min(
       2.0,
       math.min(

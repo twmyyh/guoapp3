@@ -66,7 +66,7 @@ void main() {
   }
 
   testWidgets(
-    'duplicate errors switch once while keeping progress, rate and pause state',
+    'duplicate errors refresh once while keeping progress, rate and pause state',
     (tester) async {
       final repository = RouteRepository();
       final player = ScriptedPlayer();
@@ -85,8 +85,10 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       await settleOperations(tester);
-      expect(repository.fallbackCalls, 1);
-      expect(repository.primaryCalls, 1);
+      // 同步抛出的两条错误只会触发一次刷新（不会重复排队），
+      // 且首次恢复只重开当前线路，不立刻跳到备用线路。
+      expect(repository.primaryCalls, 2);
+      expect(repository.fallbackCalls, 0);
       expect(player.opened.last.start, const Duration(seconds: 28));
       expect(player.state.rate, 1.5);
       expect(player.played.last, isFalse);
@@ -107,12 +109,14 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
         await settleOperations(tester);
       }
+      // 新播放器的恢复阶梯：刷新当前线路 -> 切备用线路 -> 停止。
+      // 只有两条线路，因此备用线路只尝试一次，之后不再空转重试。
       expect(repository.primaryCalls, 2);
-      expect(repository.fallbackCalls, 2);
+      expect(repository.fallbackCalls, 1);
       expect(find.text('暂时无法播放'), findsOneWidget);
       expect(repository.active, isEmpty);
       await tester.pump(const Duration(seconds: 25));
-      expect(repository.primaryCalls + repository.fallbackCalls, 4);
+      expect(repository.primaryCalls + repository.fallbackCalls, 3);
       repository.broken = false;
       await tester.tap(find.text('重试播放'));
       await settleOperations(tester);
@@ -129,6 +133,11 @@ void main() {
       final repository = RouteRepository()..deferFallback = true;
       final player = ScriptedPlayer();
       await mount(tester, repository, player);
+      // 第一次错误只刷新当前线路，需要再失败一次才会请求备用线路（延迟返回）。
+      player.fail();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await settleOperations(tester);
       player.fail();
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
@@ -263,13 +272,11 @@ void main() {
       final quality = tester.getRect(
         find.byKey(const ValueKey('player-quality')),
       );
-      final route = tester.getRect(find.byKey(const ValueKey('player-route')));
       final pip = tester.getRect(
         find.byKey(const ValueKey('player-picture-in-picture')),
       );
       expect(quality.left - speed.right, lessThan(8));
-      expect(route.left - quality.right, lessThan(8));
-      expect(pip.left - route.right, lessThan(8));
+      expect(pip.left - quality.right, lessThan(8));
       expect(pip.right, greaterThan(330));
       await unmount(tester, player);
     } finally {
@@ -292,6 +299,9 @@ void main() {
         size: const Size(390, 844),
         theme: ThemeData.light(),
       );
+      // 控制条 4 秒后自动隐藏；右侧中央的弹幕按钮只在控制条可见时挡住触摸，
+      // 因此等它退场后再长按，才等价于真实播放中的手势。
+      await tester.pump(const Duration(seconds: 5));
       final surface = tester.getRect(
         find.byKey(const ValueKey('player-gesture-surface')),
       );
@@ -300,40 +310,18 @@ void main() {
       await tester.pump(const Duration(milliseconds: 450));
       await tester.pump(const Duration(milliseconds: 200));
       expect(player.rates.last, 2);
-      expect(find.textContaining('松开恢复'), findsNothing);
-      expect(
-        tester
-            .widget<AnimatedOpacity>(
-              find.byKey(const ValueKey('player-boost-badge')),
-            )
-            .opacity,
-        1,
-      );
+      // 长按期间只在画面中央留一行「2 倍速 · 松开恢复」提示。
+      expect(find.textContaining('松开恢复'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('player-speed')).hitTestable(),
-        findsNothing,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is Container &&
-              widget.decoration is BoxDecoration &&
-              (widget.decoration as BoxDecoration).color == Colors.black87,
-        ),
         findsNothing,
       );
       await gesture.up();
       await tester.pump();
       expect(player.rates.last, 1);
+      expect(find.textContaining('恢复'), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 1500));
       expect(find.textContaining('恢复'), findsNothing);
-      expect(
-        tester
-            .widget<AnimatedOpacity>(
-              find.byKey(const ValueKey('player-boost-badge')),
-            )
-            .opacity,
-        0,
-      );
       await unmount(tester, player);
     } finally {
       debugDefaultTargetPlatformOverride = null;
@@ -341,7 +329,7 @@ void main() {
   });
 
   testWidgets(
-    'desktop hover and seek keep controls hidden while taps and space toggle them',
+    'desktop idle hides controls while hover and keys bring them back',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
@@ -353,27 +341,20 @@ void main() {
         final surface = tester.getRect(
           find.byKey(const ValueKey('player-gesture-surface')),
         );
-        final tapPoint = Offset(surface.center.dx, surface.top + 12);
+        // 空闲 4 秒后自动隐藏。
         await tester.pump(const Duration(seconds: 5));
         expect(controls.hitTestable(), findsNothing);
 
+        // 桌面端鼠标移动即唤出控制条（与 xxx 播放器一致）。
         final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-        await mouse.addPointer(location: tapPoint);
-        await mouse.moveTo(Offset(surface.center.dx, surface.center.dy));
-        await tester.pump();
-        expect(controls.hitTestable(), findsNothing);
-
-        await mouse.moveTo(Offset(surface.center.dx, surface.bottom - 8));
+        await mouse.addPointer(
+          location: Offset(surface.center.dx, surface.center.dy),
+        );
+        await mouse.moveTo(Offset(surface.center.dx, surface.center.dy - 40));
         await tester.pump();
         expect(controls.hitTestable(), findsOneWidget);
 
-        await tester.tapAt(tapPoint);
-        await tester.pump();
-        expect(controls.hitTestable(), findsNothing);
-        await tester.tapAt(tapPoint);
-        await tester.pump();
-        expect(controls.hitTestable(), findsOneWidget);
-
+        // 空格暂停/继续。
         await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
         await tester.pump();
@@ -384,13 +365,14 @@ void main() {
         await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
         await tester.pump();
         expect(player.state.playing, isTrue);
-        expect(controls.hitTestable(), findsNothing);
 
+        // 方向键回退 5 秒，并在画面中央给出提示。
+        final before = player.state.position;
         await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
         await tester.pump();
-        expect(find.textContaining('后退至'), findsNothing);
-        expect(controls.hitTestable(), findsNothing);
+        expect(player.state.position, before - const Duration(seconds: 5));
+        expect(find.textContaining('后退至'), findsOneWidget);
 
         await mouse.removePointer();
         await unmount(tester, player);
@@ -399,56 +381,4 @@ void main() {
       }
     },
   );
-
-  testWidgets('manual route selection is reused by the next episode', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-    try {
-      final repository = RouteRepository();
-      final player = ScriptedPlayer();
-      await mount(tester, repository, player, size: const Size(1280, 720));
-      expect(find.byKey(const ValueKey('player-route')), findsOneWidget);
-      expect(find.text('线路 1'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('player-route')));
-      await tester.pumpAndSettle();
-      expect(find.text('播放线路'), findsWidgets);
-      await tester.tap(find.byKey(const ValueKey('menu-route-1')));
-      await tester.pumpAndSettle();
-      expect(repository.routeCalls, 1);
-      expect(repository.requestedRoutes.last, 1);
-      expect(find.text('线路 2'), findsOneWidget);
-      expect(player.state.playing, isTrue);
-      await tester.tap(find.byTooltip('下一集'));
-      await settleOperations(tester);
-      expect(repository.requestedEpisodes.last, 2);
-      expect(repository.requestedRoutes.last, 1);
-      expect(find.text('线路 2'), findsOneWidget);
-      await unmount(tester, player);
-      expect(repository.active, isEmpty);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
-
-  testWidgets('switching episodes keeps the control overlay hidden', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-    try {
-      final repository = RouteRepository();
-      final player = ScriptedPlayer();
-      await mount(tester, repository, player, size: const Size(1280, 720));
-      final controls = find.byKey(const ValueKey('player-speed'));
-      expect(controls.hitTestable(), findsOneWidget);
-      await tester.tap(find.byTooltip('下一集'));
-      await settleOperations(tester);
-      expect(repository.requestedEpisodes.last, 2);
-      expect(player.state.playing, isTrue);
-      expect(controls.hitTestable(), findsNothing);
-      await unmount(tester, player);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
 }

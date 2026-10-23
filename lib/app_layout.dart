@@ -77,6 +77,46 @@ class AppDevice {
     }
   }
 
+  /// 系统亮度调节能力。
+  ///
+  /// 只有 Android 由 MainActivity 提供窗口级亮度覆盖；桌面端没有等价
+  /// 能力，手势里必须据此关掉亮度分支，避免出现“有条无效果”的假调节。
+  static bool get brightnessSupported =>
+      defaultTargetPlatform == TargetPlatform.android;
+
+  /// 读取当前屏幕亮度（0.0 ~ 1.0）。
+  ///
+  /// 只对 Android 生效：窗口级亮度覆盖由 MainActivity 的
+  /// `screenBrightness` 通道返回；其它平台没有“屏幕亮度”这个概念，
+  /// 直接给 0.5 让播放器的手势 HUD 有一个中性起点。
+  static Future<double> getBrightness() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return 0.5;
+    try {
+      final value = await channel.invokeMethod<double>('screenBrightness');
+      return (value ?? 0.5).clamp(0.0, 1.0);
+    } catch (_) {
+      return 0.5;
+    }
+  }
+
+  /// 临时把窗口亮度调到 [brightness]（0.01 ~ 1.0），退出播放页需复位。
+  static Future<void> setBrightness(double brightness) async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await channel.invokeMethod('setScreenBrightness', {
+        'value': brightness.clamp(0.01, 1.0),
+      });
+    } catch (_) {}
+  }
+
+  /// 取消窗口亮度覆盖，恢复系统亮度。
+  static Future<void> resetBrightness() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await channel.invokeMethod('resetScreenBrightness');
+    } catch (_) {}
+  }
+
   static Future<bool> compatibleRendering() async {
     if (defaultTargetPlatform != TargetPlatform.android) return false;
     try {

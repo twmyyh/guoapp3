@@ -36,7 +36,6 @@ import 'library_updater.dart';
 import 'live_repository.dart';
 import 'live_screen.dart';
 import 'live_store.dart';
-import 'player_picker.dart';
 import 'saved_library.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -847,13 +846,6 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _selectionMode = true);
     } else if (value == 'sources') {
       _manageSources();
-    } else if (value == 'player') {
-      Navigator.push(
-        context,
-        MaterialPageRoute<void>(
-          builder: (_) => PlayerPickerScreen(store: widget.store),
-        ),
-      );
     } else if (value == 'live') {
       Navigator.push(
         context,
@@ -1072,13 +1064,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: () => _moreAction('sources'),
                 ),
               PullDownEntry(
-                label: '播放器选择',
-                icon: LucideIcons.clapperboard,
-                dividerBefore:
-                    catalog && !widget.repository.supportsSourceManagement,
-                onPressed: () => _moreAction('player'),
-              ),
-              PullDownEntry(
                 label: '直播入口',
                 icon: LucideIcons.tv,
                 onPressed: () => _moreAction('live'),
@@ -1278,10 +1263,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               value: 'sources',
                               child: Text('站源管理'),
                             ),
-                          const PopupMenuItem(
-                            value: 'player',
-                            child: Text('播放器选择'),
-                          ),
                           const PopupMenuItem(
                             value: 'live',
                             child: Text('直播入口'),
