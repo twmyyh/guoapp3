@@ -1499,7 +1499,9 @@ func (d *Downloader) xbpqCatalog(ctx context.Context, source, base string, page 
 	}
 	titlePattern := rule.field("标题", prefix+"标题")
 	linkPattern := rule.field("链接", prefix+"链接")
-	picturePattern := rule.field("图片", prefix+"图片", "主图")
+	// 列表封面：新写源工具把列表层封面写成 列表图片（图片/主图/封面图 都是它的别名），
+	// 这里优先取 列表图片，避免规则同时写了详情封面 封面 时把列表封面取错。
+	picturePattern := rule.field(prefix+"图片", "图片", "主图", "封面图")
 	remarkPattern := rule.field("副标题", prefix+"副标题", "备注")
 	numericID := rule.field("详情url", "详情页url") != ""
 	var dramas []Drama
@@ -1589,7 +1591,7 @@ func xbpqComposeSpec(address, method, body string) string {
 func (d *Downloader) xbpqItemsToCatalog(ctx context.Context, source, base, pageURL string, items []xbpqItem, rule xbpqRule, prefix string) ([]Drama, bool, error) {
 	titlePattern := rule.field(prefix+"标题", "标题")
 	linkPattern := rule.field(prefix+"链接", "链接")
-	picturePattern := rule.field(prefix+"图片", "图片")
+	picturePattern := rule.field(prefix+"图片", "图片", "主图", "封面图")
 	remarkPattern := rule.field(prefix+"副标题", "副标题")
 	numericID := rule.field("详情url", "详情页url") != ""
 	var dramas []Drama
@@ -1757,41 +1759,54 @@ func xbpqEpisodes(body, pageURL string, rule xbpqRule) ([]xbpqEpisode, [][]xbpqE
 		if group == "" {
 			continue
 		}
-		var entries []xbpqEpisode
-		for _, item := range strings.Split(group, listSplit) {
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-			name, address := item, ""
-			if head, tail, found := strings.Cut(item, "$"); found {
-				name, address = head, tail
-			}
-			if titlePattern != "" {
-				if cut := xbpqCutOnce(item, titlePattern); cut != "" {
-					name = cut
+		parseItems := func(separator string) []xbpqEpisode {
+			var entries []xbpqEpisode
+			for _, item := range strings.Split(group, separator) {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
 				}
-			}
-			if linkPattern != "" {
-				if cut := xbpqCutOnce(item, linkPattern); cut != "" {
-					address = cut
+				name, address := item, ""
+				if head, tail, found := strings.Cut(item, "$"); found {
+					name, address = head, tail
 				}
+				if titlePattern != "" {
+					if cut := xbpqCutOnce(item, titlePattern); cut != "" {
+						name = cut
+					}
+				}
+				if linkPattern != "" {
+					if cut := xbpqCutOnce(item, linkPattern); cut != "" {
+						address = cut
+					}
+				}
+				if strings.HasPrefix(address, "$") {
+					continue
+				}
+				address = maccmsNormalizePlaybackURL(strings.TrimSpace(address))
+				name = xbpqCleanText(name)
+				if name == "" && strings.Contains(address, "://") {
+					name = "第" + strconv.Itoa(len(entries)+1) + "集"
+				}
+				if name == "" || address == "" {
+					continue
+				}
+				if routePattern != "" && routeIndex == 0 {
+					// 线路标题仅用于展示，不影响分集解析
+				}
+				entries = append(entries, xbpqEpisode{title: name, url: address})
 			}
-			if strings.HasPrefix(address, "$") {
-				continue
+			return entries
+		}
+		entries := parseItems(listSplit)
+		// 分隔符自适应（模板兜底安全网）：模板给的唯一分隔符可能与该站容器不符
+		// ——典型是容器里 `<a>` 连排（module-play-list 一类）却按 `<li` 切，
+		// 整段会塌成 1 集。判据用「只切出 ≤1 段、且这段里含 ≥2 个 href」：
+		// 单集的电影页容器里本来就只有 1 个 href，不会误触发。
+		if len(entries) <= 1 && strings.Count(group, "href=") >= 2 {
+			if alternate := parseItems("<a"); len(alternate) > len(entries) {
+				entries = alternate
 			}
-			address = maccmsNormalizePlaybackURL(strings.TrimSpace(address))
-			name = xbpqCleanText(name)
-			if name == "" && strings.Contains(address, "://") {
-				name = "第" + strconv.Itoa(len(entries)+1) + "集"
-			}
-			if name == "" || address == "" {
-				continue
-			}
-			if routePattern != "" && routeIndex == 0 {
-				// 线路标题仅用于展示，不影响分集解析
-			}
-			entries = append(entries, xbpqEpisode{title: name, url: address})
 		}
 		if len(entries) > len(best) {
 			best = entries

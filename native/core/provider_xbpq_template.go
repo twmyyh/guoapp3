@@ -8,6 +8,17 @@ package core
 //     自动套用内置模板（数组/标题/链接/图片/播放/搜索全套默认）。
 // 本文件为 provider_xbpq.go 补上同一能力：识别 MacCMS/stui 两大模板家族，
 // 为缺失字段补 || 多组备选的默认截取 pattern，已写字段一律不覆盖。
+//
+// 与 wrxbpq（写源工具）的 internal/xbpq/template.go 保持逐项同步：
+// 家族名、match 正则、字段值都以那边为准，那边实测过新皮肤后再同步到这里。
+// 最近一轮同步点：
+//   - MacCMS 家族 match 放宽到 /index.php/(vod|art)/、/vodplay|voddetail/、
+//     /list/{cateId}-…html 伪静态、vod-play-id- 短路径；
+//   - MacCMS 数组首个备选补 `<a ` 前缀（myui 的 <a> 由 class 起头）；
+//   - 路径式家族 match 补 type|category|fenlei 并去掉「cateId 可省略」的松匹配，
+//     播放数组补 myui / content-list 容器；
+//   - 路径式 播放列表 由（错误的）截取串 `<a&&</a>||<li&&</li>` 改为分隔符 `<li`
+//     ——播放列表是分集分隔符，写整串永远切不中，整段会塌成 1 集。
 
 import (
 	"regexp"
@@ -38,20 +49,20 @@ var xbpqTemplateFamilies = []xbpqTemplateFamily{
 		name:  "MacCMS新版mxone",
 		match: regexp.MustCompile(`(?i)/index-(?:\{cateId\}|[0-9])[^/"?]*\.html`),
 		fields: map[string]string{
-			"数组":     `<div class="module-item"&&<div class="module-item"||class="module-item"><div class="module-item-cover"&&</div></div>||<div class="module-item"&&</div></div>||<li&&</li>`,
-			"标题":     `title="&&"`,
-			"副标题":    `class="module-item-text">&&</div>`,
-			"图片":     `data-src="&&"||data-original="&&"`,
-			"链接":     `href="&&"`,
-			"播放数组":   `class="module-list module-player-list tab-list sort-list&&</div>`,
-			"线路数组":   `class="module-list module-player-list tab-list sort-list&&</div>`,
-			"播放列表":   `</a>`,
-			"播放标题":   `<span>&&</span>`,
-			"播放链接":   `href="&&"`,
-			"搜索数组":   `<div class="module-search-item"&&<div class="video-info-main">`,
-			"搜索标题":   `<h3>&&</h3>`,
-			"搜索链接":   `video-serial" href="&&"`,
-			"搜索图片":   `data-src="&&"`,
+			"数组":   `<div class="module-item"&&<div class="module-item"||class="module-item"><div class="module-item-cover"&&</div></div>||<div class="module-item"&&</div></div>||<li&&</li>`,
+			"标题":   `title="&&"`,
+			"副标题":  `class="module-item-text">&&</div>`,
+			"图片":   `data-src="&&"||data-original="&&"`,
+			"链接":   `href="&&"`,
+			"播放数组": `class="module-list module-player-list tab-list sort-list&&</div>`,
+			"线路数组": `class="module-list module-player-list tab-list sort-list&&</div>`,
+			"播放列表": `</a>`,
+			"播放标题": `<span>&&</span>`,
+			"播放链接": `href="&&"`,
+			"搜索数组": `<div class="module-search-item"&&<div class="video-info-main">`,
+			"搜索标题": `<h3>&&</h3>`,
+			"搜索链接": `video-serial" href="&&"`,
+			"搜索图片": `data-src="&&"`,
 		},
 	},
 	{
@@ -75,30 +86,34 @@ var xbpqTemplateFamilies = []xbpqTemplateFamily{
 		},
 	},
 	{
-		// 苹果CMS/MacCMS 家族：/index.php/vod/show|type/…、/vodshow/…、/vodtype/…
-		// 页面多为 stui 模板；详情/播放/搜索均有高置信默认。
-		// || 备选链按 XBPQ.json 379 份真实规则聚类高频形态排序（stui→hl→module→通用）。
+		// 苹果CMS/MacCMS 家族：/index.php/vod/show|type|art/…、/vodshow/…、/vodtype/…、
+		// /list/{cateId}-{catePg}.html 伪静态、vod-list-id-/vod-play-id- 短路径。
+		// 页面多为 stui / myui 模板；详情/播放/搜索均有高置信默认。
+		// || 备选链按 XBPQ.json 379 份真实规则聚类高频形态排序（myui→stui→hl→module→通用）。
 		// mxone poster-items 皮肤（555yx.vip / qqys01.com 实测）：数组必须用
 		// `<a &&</a>[包含:module-poster-item module-item]`——直接锚
 		// `module-poster-item&&</a>` 会把卡片截半、目录塌成 1 条。
-		match: regexp.MustCompile(`(?i)/index\.php/vod/(show|type)/|/vod(show|type)[/_]|vod-list-id-`),
+		name:  "MacCMS",
+		match: regexp.MustCompile(`(?i)/index\.php/(vod|art)/|/vod(show|type|play|detail)/|/list/(?:\{cateId\}|[0-9])[^/"]*\.html|vod-(?:list|play)-id-`),
 		fields: map[string]string{
-			"数组":     `class="myui-vodlist__thumb&&</a>||class="myui-vodlist__box&&</a>||class="stui-vodlist__thumb&&</a>||stui-vodlist__box">&&</div></div>||hl-item-thumb hl-lazy"&&</a>||<a &&</a>[包含:module-poster-item module-item]||<li class="col-md-6&&</li>||<li&&</li>`,
-			"标题":     `title="&&"||alt="&&"`,
-			"图片":     `data-original="&&"||data-src="&&"||src="&&"`,
-			"副标题":    `pic-text text-right">&&</span>||class="remark">&&<||module-item-text">&&</div>||class="module-item-note">&&</div>`,
-			"链接":     `href="&&"`,
-			"简介":     `detail-content" style=*>&&</span>||class="stui-content__detail&&</div>||简介：</em>&&||class="module-info-intro-content&&</div>`,
-			"播放数组":   `<ul class="stui-content__playlist&&</ul>||<ul class="myui-content__list&&</ul>||id="hl-plays-list"&&</ul>||mod play-list&&</ul||class="play_box&&</div>||class="module-play-list-content&&</div>`,
+			// 首个备选带 `<a ` 前缀（myui 的 <a class="myui-vodlist__thumb …"> 由 class 起头，
+			// 缺了 `<a` 段内会丢开标签，个别皮肤下 链接 截不出来）。
+			"数组":   `<a class="myui-vodlist__thumb&&</a>||class="myui-vodlist__box&&</a>||class="stui-vodlist__thumb&&</a>||stui-vodlist__box">&&</div></div>||hl-item-thumb hl-lazy"&&</a>||<a &&</a>[包含:module-poster-item module-item]||<li class="col-md-6&&</li>||<li&&</li>`,
+			"标题":   `title="&&"||alt="&&"`,
+			"图片":   `data-original="&&"||data-src="&&"||src="&&"`,
+			"副标题":  `pic-text text-right">&&</span>||class="remark">&&<||module-item-text">&&</div>||class="module-item-note">&&</div>`,
+			"链接":   `href="&&"`,
+			"简介":   `detail-content" style=*>&&</span>||class="stui-content__detail&&</div>||简介：</em>&&||class="module-info-intro-content&&</div>`,
+			"播放数组": `<ul class="stui-content__playlist&&</ul>||<ul class="myui-content__list&&</ul>||id="hl-plays-list"&&</ul>||mod play-list&&</ul||class="play_box&&</div>||class="module-play-list-content&&</div>`,
 			// mxone 皮肤线路数组：每个 module-play-list-content 容器即一条线路，
 			// 引擎按线路数组循环截取并以 $$$ 拼多线路（xbpqEpisodes）。
 			"线路数组": `class="module-play-list-content&&</div>`,
 			// 播放列表是**分集分隔符**（字面 Split），不是截取串：`<a` 切出每个
 			// 分集片段后由 播放标题/播放链接 再截；写 `<a&&</a>` 会切不中塌成 1 集。
-			"播放列表":   `<a`,
-			"播放标题":   `>&&</a>||>&&<||<span>&&</span>`,
-			"播放链接":   `href="&&"`,
-			"线路标题":   `<h3 class="title">&&</h3>||<span class="title">&&</span>||play_tit&&</||data-name="&&"`,
+			"播放列表": `<a`,
+			"播放标题": `>&&</a>||>&&<||<span>&&</span>`,
+			"播放链接": `href="&&"`,
+			"线路标题": `<h3 class="title">&&</h3>||<span class="title">&&</span>||play_tit&&</||data-name="&&"`,
 			// 聚类最高频跳转形态（15 处，含尾引号——单侧无尾锚会吃到页尾）：
 			// var player_ 前缀锚点不会误命中同页 var maccms 的 "url":"；
 			// player_aaaa_ 是 mxone（苹果新版）皮肤的同族变体（qqys01 实测）。
@@ -111,17 +126,23 @@ var xbpqTemplateFamilies = []xbpqTemplateFamily{
 		},
 	},
 	{
-		// 短剧/路径式 CMS：/show/{id}-{area}-…-{pg}---{year}.html、/vs/、/vshow/ 等。
-		match: regexp.MustCompile(`(?i)/(show|vs|vshow|screen|list)/?\{?cateId\}?`),
+		// 短剧/路径式 CMS（模板库 §3/§4）：/show/{id}-{area}-…-{pg}---{year}.html、/vs/、
+		// /vshow/、/type/{slug}/{pg}/、/category/…、/fenlei/… 等。
+		// conch/module/stui 皮肤混杂，备选链兜底；这一族没有可靠通用默认，只给通用高频值。
+		name:  "路径式泛型",
+		match: regexp.MustCompile(`(?i)/(show|vs|vshow|screen|list|type|category|fenlei)/(?:\{cateId\}|[0-9a-z])`),
 		fields: map[string]string{
-			"数组":     `class="stui-vodlist__thumb&&</a>||module-item&&</a>||<li&&</li>`,
-			"标题":     `title="&&"||alt="&&"`,
-			"图片":     `data-original="&&"||data-src="&&"||src="&&"`,
-			"副标题":    `pic-text text-right">&&</span>||module-item-text">&&</div>`,
-			"链接":     `href="&&"`,
-			"简介":     `detail-content" style=*>&&</span>||class="video-info&&</div>`,
-			"播放数组":   `<ul class="stui-content__playlist&&</ul>||class="module-play-list&&</div>`,
-			"播放列表":   `<a&&</a>||<li&&</li>`,
+			"数组":  `class="stui-vodlist__thumb&&</a>||module-item&&</a>||<li&&</li>`,
+			"标题":  `title="&&"||alt="&&"`,
+			"图片":  `data-original="&&"||data-src="&&"||src="&&"`,
+			"副标题": `pic-text text-right">&&</span>||module-item-text">&&</div>`,
+			"链接":  `href="&&"`,
+			"简介":  `detail-content" style=*>&&</span>||class="video-info&&</div>`,
+			// 容器备选顺序与分隔符 <li 对齐：先 <li> 连排的 ul（stui/myui/content-list），
+			// 再 <a> 连排的 div（module-play-list，靠引擎的分隔符自适应兜底）。
+			"播放数组": `<ul class="stui-content__playlist&&</ul>||<ul class="myui-content__list&&</ul>||<ul class="content-list&&</ul>||class="module-play-list&&</div>`,
+			// 分隔符：<li> 连排写 <li（写整串 <li&&</li> 会切不中，整段塌成 1 集）。
+			"播放列表":   `<li`,
 			"播放标题":   `>&&</a>||>&&<`,
 			"播放链接":   `href="&&"`,
 			"线路标题":   `<h3 class="title">&&</h3>`,

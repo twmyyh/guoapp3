@@ -2,9 +2,21 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.4+97（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.5+98（未验证开发快照）**。
 
-本轮（1.4.4+97）参照 guoappxxx 项目的 Windows 播放调优结论，集中处理 **Windows 桌面端播放卡顿与花屏**。改动全部在 Flutter 侧（`lib/`），不影响 Android / iOS / macOS 与本地 Web 服务版。五处：
+本轮（1.4.5+98）把 **wrxbpq 写源工具的 XBPQ 更新同步进本项目的内嵌引擎**，重点是内置模板库。`wrxbpq/internal/xbpq/template.go` 是模板的唯一真源（那边实测新皮肤后先改它），本次按它逐项对齐 `native/core/provider_xbpq_template.go`，共四处。
+
+1. **MacCMS 家族的 match 与数组锚点放宽**（`provider_xbpq_template.go`）。分类url 识别正则由 `/index\.php/vod/(show|type)/|/vod(show|type)[/_]|vod-list-id-` 放宽为 `/index\.php/(vod|art)/|/vod(show|type|play|detail)/|/list/(?:\{cateId\}|[0-9])[^/"]*\.html|vod-(list|play)-id-`：补齐 `art` 频道的 `/index.php/art/…`、`/vodplay/`、`/voddetail/`、`/list/{cateId}-{catePg}.html` 伪静态和 `vod-play-id-` 短路径形态。模板库 §8之一（555yx.vip 式 mxone poster-items）与 §8之二（qqys01 式 dash vodshow）都靠这个家族兜底，此前形态不在正则里的站会退化到「通用高频」，只剩标题/链接/图片三个默认字段。数组链首个备选补回 `<a ` 前缀（`<a class="myui-vodlist__thumb&&</a>`）——myui 皮肤的 `<a>` 由 class 起头，缺了开标签个别皮肤下 `链接` 会截空。
+
+2. **路径式家族的 match 与播放数组**。match 由 `(show|vs|vshow|screen|list)/?\{?cateId\}?` 改为 `(show|vs|vshow|screen|list|type|category|fenlei)/(?:\{cateId\}|[0-9a-z])`：补 `type`/`category`/`fenlei` 三类常见目录名（英文 slug 分类 `/type/{slug}/{page}/` 属这一族），同时去掉「`cateId` 可省略」的松匹配——旧正则连裸 `/list/` 都能命中，会把不该套模板的站也套上。播放数组补 `<ul class="myui-content__list&&</ul>`、`<ul class="content-list&&</ul>` 两个容器备选。
+
+3. **修掉路径式家族的 `播放列表`**。原来写的是 `<a&&</a>||<li&&</li>`，但 `播放列表` 是分集**分隔符**（引擎里是字面 `strings.Split`），不是截取串——按整串切永远切不中，HTML 整段会被当成 1 集。改为 `<li`（与 wrxbpq 一致）。为了让这个唯一分隔符不至于在「`<a>` 连排」容器（`module-play-list` 一类，容器里没有 `<li>`）上反向塌成 1 集，`xbpqEpisodes` 加了分隔符自适应：主分隔符只切出 ≤1 段、且这段里出现 ≥2 个 `href=` 时，说明整段其实是被吞掉的多个分集，改用 `<a` 重切并取更多的一侧；单片电影容器里本来就只有一个 `href`，不会误触发（另有反例用例守着）。
+
+4. **列表封面字段按新字段字典取值**。新写源工具把列表层封面写成 `列表图片`（`图片`/`主图`/`封面图` 都是它的别名，详情封面才是 `封面`）。`xbpqCatalog` 原先按 `("图片","列表图片","主图")` 取，规则同时写了 `图片`（详情用）与 `列表图片` 时会取错；改为优先 `列表图片`，搜索层同样补上 `主图`/`封面图` 别名。
+
+验证：新增 `native/core/provider_xbpq_template_test.go` 5 例——家族命中矩阵（mxone / MacCMS 各形态 / 路径式各形态 / 通用高频兜底）、路径式分隔符必须切出 3 集、`<a>` 连排容器自适应切出 2 集、单片电影保持 1 集、列表封面取 `列表图片`；`go test ./core -run TestXBPQ` 全绿（原有 16 例一并回归）。`go build ./...`、`go vet ./core` 通过，`gofmt` 干净。全量 `go test ./core` 仍有 6 个失败，与上一轮记录的既有 flaky / 需联网用例完全一致（HLS 重定向、弹幕 emoji、legacy session、红果榜单、目录缓存、剧源分类），不在本轮改动文件内。真实站点的简写规则效果待装包后实测；按约定本轮为未验证开发快照。
+
+上一轮（1.4.4+97）参照 guoappxxx 项目的 Windows 播放调优结论，集中处理 **Windows 桌面端播放卡顿与花屏**。改动全部在 Flutter 侧（`lib/`），不影响 Android / iOS / macOS 与本地 Web 服务版。五处：
 
 1. **移除 Windows「硬件增强（d3d11vpp）」档**（`lib/video_enhancement_policy.dart`、`lib/video_enhancement.dart`）。该档用 `vf add d3d11vpp=scale=...:format=nv12` 让显卡驱动做缩放，但 Windows 的硬解自 guoappxxx 起已改为 `d3d11va-copy`（解码后拷回系统内存），帧不再留在 GPU 上的 D3D11 纹理里，`d3d11vpp` 拿不到可处理的输入，轻则整档失效、重则画面撕裂 / 绿边花屏。参考文献项目的结论直接删除该档：枚举值 `VideoEnhancementBackend.hardware`、「清晰优先」模式的命中分支、`_hardwareFramesChanged()` 生效确认、`_failBackend` 的特殊降档、状态文案与 `_vendor`/`_filterLabel` 相关遗留一并清除。删档后「清晰优先」在真人片上落到 `fsrcnnx`（神经超分）或 `ravu`，行为与 guoappxxx 一致。
 
