@@ -1200,10 +1200,15 @@ type xbpqItem struct {
 	doc  *html.Node
 }
 
-func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, pageURL, prefix string) []xbpqItem {
+func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, pageURL, prefix string) ([]xbpqItem, error) {
 	body, err := d.xbpqFetch(ctx, pageURL, base+"/", rule.userAgent())
-	if err != nil || body == "" {
-		return nil
+	if err != nil {
+		// 抓取失败（403/超时/DNS）必须原样上抛：否则会被上层统一报成
+		// 「未抽取到列表条目」，让用户误以为规则写错，排查方向被带偏。
+		return nil, err
+	}
+	if strings.TrimSpace(body) == "" {
+		return nil, fmt.Errorf("站点返回空页面")
 	}
 	arrayPattern := rule.field(prefix+"数组", "数组")
 	// json 模式数组（笔记 item 7）：二次截取先按路径缩小，数组按路径迭代元素。
@@ -1218,26 +1223,26 @@ func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, 
 			items = append(items, xbpqItem{text: one})
 		}
 		if len(items) > 0 {
-			return items
+			return items, nil
 		}
 	}
 	if arrayPattern == "" {
 		if jsonItems := xbpqJSONList(body, rule, prefix); len(jsonItems) > 0 {
-			return jsonItems
+			return jsonItems, nil
 		}
-		return nil
+		return nil, nil
 	}
 	document, _ := html.Parse(strings.NewReader(body))
 	if strings.HasPrefix(arrayPattern, "p:") || strings.HasPrefix(arrayPattern, "jsoup:") {
 		selector, ok := xbpqParseSelector(arrayPattern)
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		var items []xbpqItem
 		for _, node := range xbpqSelectorNodes(document, selector) {
 			items = append(items, xbpqItem{node: node, doc: document, text: xbpqRenderHTML(node)})
 		}
-		return items
+		return items, nil
 	}
 	// 截掉 [列表] 之外的部分：二次截取先行
 	if region := rule.field(prefix+"二次截取", "二次截取"); region != "" {
@@ -1264,10 +1269,10 @@ func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, 
 	}
 	if len(items) == 0 {
 		if jsonItems := xbpqJSONList(body, rule, prefix); len(jsonItems) > 0 {
-			return jsonItems
+			return jsonItems, nil
 		}
 	}
-	return items
+	return items, nil
 }
 
 // xbpqJSONList 兜底：页面里嵌着 MacCMS 风格 JSON（vod_name/vod_id…）时直接解析。
@@ -1473,6 +1478,20 @@ func xbpqCategoryURL(rule xbpqRule, base, categoryID string, page int) string {
 	return xbpqCleanEmptySegments(xbpqRenderURL(template, base, values))
 }
 
+// xbpqArrayMismatchHint 生成「条数为 0」时的定位提示：带出实际生效的 数组 模式，
+// 让用户能直接对照站点 HTML 判断是模式写错还是页面结构变了。
+func xbpqArrayMismatchHint(rule xbpqRule, prefix string) string {
+	pattern := strings.TrimSpace(rule.field(prefix+"数组", "数组"))
+	if pattern == "" {
+		return "规则没有「" + prefix + "数组」字段"
+	}
+	pattern = xbpqCleanText(pattern)
+	if runes := []rune(pattern); len(runes) > 80 {
+		pattern = string(runes[:80]) + "…"
+	}
+	return "数组「" + pattern + "」没有匹配到站点结构"
+}
+
 // ---- 目录 ----
 
 func (d *Downloader) xbpqCatalog(ctx context.Context, source, base string, page int, category string, rule xbpqRule) ([]Drama, bool, error) {
@@ -1493,9 +1512,12 @@ func (d *Downloader) xbpqCatalog(ctx context.Context, source, base string, page 
 	if categoryID != "" {
 		prefix = "列表"
 	}
-	items := d.xbpqExtractItems(ctx, rule, base, pageURL, prefix)
+	items, fetchErr := d.xbpqExtractItems(ctx, rule, base, pageURL, prefix)
 	if len(items) == 0 {
-		return nil, false, fmt.Errorf("规则未抽取到列表条目")
+		if fetchErr != nil {
+			return nil, false, fmt.Errorf("规则列表页抓取失败：%w", fetchErr)
+		}
+		return nil, false, fmt.Errorf("规则未抽取到列表条目（%s）", xbpqArrayMismatchHint(rule, prefix))
 	}
 	titlePattern := rule.field("标题", prefix+"标题")
 	linkPattern := rule.field("链接", prefix+"链接")
@@ -1559,12 +1581,16 @@ func (d *Downloader) xbpqSearch(ctx context.Context, source, base, query string,
 			if method != "" && strings.Contains(body, "{wd}") {
 				body = strings.ReplaceAll(body, "{wd}", query)
 			}
-			items := d.xbpqExtractItems(ctx, rule, base, xbpqComposeSpec(pageURL, method, body), "搜索")
+			items, fetchErr := d.xbpqExtractItems(ctx, rule, base, xbpqComposeSpec(pageURL, method, body), "搜索")
 			if len(items) == 0 {
-				items = d.xbpqExtractItems(ctx, rule, base, xbpqComposeSpec(pageURL, method, body), "")
+				items, fetchErr = d.xbpqExtractItems(ctx, rule, base, xbpqComposeSpec(pageURL, method, body), "")
 			}
 			if len(items) == 0 {
-				lastErr = fmt.Errorf("搜索页未抽取到结果")
+				if fetchErr != nil {
+					lastErr = fmt.Errorf("搜索页抓取失败：%w", fetchErr)
+				} else {
+					lastErr = fmt.Errorf("搜索页未抽取到结果（%s）", xbpqArrayMismatchHint(rule, "搜索"))
+				}
 				continue
 			}
 			dramas, _, err := d.xbpqItemsToCatalog(ctx, source, base, pageURL, items, rule, "搜索")

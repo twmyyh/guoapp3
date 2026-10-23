@@ -2,9 +2,17 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.5+98（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.6+99（未验证开发快照）**。
 
-本轮（1.4.5+98）把 **wrxbpq 写源工具的 XBPQ 更新同步进本项目的内嵌引擎**，重点是内置模板库。`wrxbpq/internal/xbpq/template.go` 是模板的唯一真源（那边实测新皮肤后先改它），本次按它逐项对齐 `native/core/provider_xbpq_template.go`，共四处。
+本轮（1.4.6+99）修一个用户实测报障：**导入 hanjuds（`www.hanjuds.com`）的 XBPQ 规则后，本地服务版一律提示「规则未抽取到列表条目」，但同一条规则在写源工具里是好的**。排查结论：规则本身没问题，是两层问题叠在一起——传输层选错了通道，上层又把真实错误吞了。
+
+1. **自定义源 host 的传输通道选错（根因）**（`native/core/network_browser.go`）。`registerCustomBrowserHost` 会把每个自定义源 host 登记进「浏览器指纹传输」白名单，命中后请求改走 tls-client 的 Chrome 150 指纹（utls）。实测该站对这套指纹直接返回 `403` + `cf-mitigated: challenge`，而标准 Go 传输（带规则里的 `请求头`）稳定 200；用 tls-client 试 Chrome 120/133/150 四种指纹全部被挡，确认不是 UA 或版本号问题。现在把运行期登记的自定义源 host 与内置 Browser 源区分开：**先走标准传输**（吃规则里的 UA，绝大多数站点本就够用），只有真的拿到验证页（403/429/503 且带 `cf-mitigated: challenge`，或 403）才升级到指纹传输，并在进程内记住该 host 后续直连指纹通道——CF 前缀加速源照旧能用，普通 CMS 站不再被误伤。内置 Browser 源（`huangguo.video` 等静态白名单）行为不变。切换通道时写一条 `network.browser_request` 诊断，便于定位站点拦截。
+
+2. **抓取失败被伪装成规则问题**（`native/core/provider_xbpq.go`）。`xbpqExtractItems` 原来是 `if err != nil || body == "" { return nil }`，403、超时、DNS 失败全被压成空列表，上层统一报「规则未抽取到列表条目」——用户只会去改规则，方向完全被带偏，这次排障也正因此多绕了几圈。现在抓取错误原样上抛，`xbpqCatalog` / `xbpqSearch` 分别报「规则列表页抓取失败：<原因>」「搜索页抓取失败：<原因>」；确实是 0 条时，错误里带上实际生效的 `数组` 模式并提示「没有匹配到站点结构」，写规则的人可以直接对照页面 HTML 判断是模式写错还是站点改版。
+
+验证：新增 `native/core/network_browser_test.go` 4 例（自定义源先用标准传输、撞上验证页才升级且只升级一次、内置 Browser 源仍直接用指纹、未登记 host 不受影响）与 `native/core/provider_xbpq_hanjuds_test.go` 4 例（真实列表页样本抽出 50+ 条且首条标题/ID/封面正确、403 报「抓取失败」而非「未抽取到条目」、空页面提示数组不匹配、`播放列表=</a>` 切出 3 集）。样本页 `native/core/testdata/xbpq_hanjuds_list.html` 为该规则的真实分类页。`go test ./core -run TestXBPQ` 全绿，`go build ./...`、`go vet ./core ./server`、`gofmt` 干净；全量 `go test ./core` 仍是那 6 个既有失败（HLS 重定向、弹幕 emoji、legacy session、红果榜单、目录缓存、剧源分类），与本轮无关。另用编译后的本地服务实测该规则：目录 55 条 / 第 2 页 57 条、详情标题正确、剧集类分集数 9 / 2 / 16 与页面一致、`播放列表` 切出的分集地址正确、取流拿到真实 m3u8 且 `/api/media/` 代理 200、搜索「人生复本」命中 2 条。改动在共享 Go 核心，四端 App 与本地 Web 服务版同时生效；按约定本轮为未验证开发快照。
+
+上一轮（1.4.5+98）把 **wrxbpq 写源工具的 XBPQ 更新同步进本项目的内嵌引擎**，重点是内置模板库。`wrxbpq/internal/xbpq/template.go` 是模板的唯一真源（那边实测新皮肤后先改它），本次按它逐项对齐 `native/core/provider_xbpq_template.go`，共四处。
 
 1. **MacCMS 家族的 match 与数组锚点放宽**（`provider_xbpq_template.go`）。分类url 识别正则由 `/index\.php/vod/(show|type)/|/vod(show|type)[/_]|vod-list-id-` 放宽为 `/index\.php/(vod|art)/|/vod(show|type|play|detail)/|/list/(?:\{cateId\}|[0-9])[^/"]*\.html|vod-(list|play)-id-`：补齐 `art` 频道的 `/index.php/art/…`、`/vodplay/`、`/voddetail/`、`/list/{cateId}-{catePg}.html` 伪静态和 `vod-play-id-` 短路径形态。模板库 §8之一（555yx.vip 式 mxone poster-items）与 §8之二（qqys01 式 dash vodshow）都靠这个家族兜底，此前形态不在正则里的站会退化到「通用高频」，只剩标题/链接/图片三个默认字段。数组链首个备选补回 `<a ` 前缀（`<a class="myui-vodlist__thumb&&</a>`）——myui 皮肤的 `<a>` 由 class 起头，缺了开标签个别皮肤下 `链接` 会截空。
 
