@@ -574,7 +574,6 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
               DropdownButtonFormField<String>(
                 key: const ValueKey('custom-source-kind'),
                 initialValue: _kind,
-                enabled: !_busy,
                 decoration: const InputDecoration(
                   labelText: '源类型',
                   helperText:
