@@ -43,6 +43,7 @@ import 'package:duanju_app/lan_screen.dart';
 import 'package:duanju_app/video_enhancement.dart';
 import 'package:duanju_app/picture_quality_applier.dart';
 import 'package:duanju_app/video_output_size.dart';
+import 'package:duanju_app/windows_playback_tuning.dart';
 import 'package:duanju_app/sleep_timer.dart';
 import 'package:duanju_app/watch_session.dart';
 
@@ -279,9 +280,10 @@ class _PlayerScreenState extends State<XiguaPlayerScreen>
     _player =
         widget.playerFactory?.call() ??
         Player(
-          configuration: PlayerConfiguration(
+          // 与 guo 播放器一致：Windows 不再开 verbose（日志洪泛会拖慢渲染）。
+          configuration: const PlayerConfiguration(
             bufferSize: 32 * 1024 * 1024,
-            logLevel: Platform.isWindows ? MPVLogLevel.v : MPVLogLevel.error,
+            logLevel: MPVLogLevel.error,
           ),
         );
     _surfaceOutput = androidSurfaceViewSupported && widget.videoBuilder == null;
@@ -1300,6 +1302,11 @@ class _PlayerScreenState extends State<XiguaPlayerScreen>
             if (Platform.isAndroid) 'ao': 'audiotrack,opensles',
           }.entries) {
             await platform.setProperty(option.key, option.value);
+          }
+          if (Platform.isWindows) {
+            // xigua 的默认档位是给手机端定的（readahead=1 抢首帧、硬解走 auto），
+            // Windows 桌面按统一调优收敛：d3d11va-copy 硬解 + 内存缓存 + 关键帧寻址。
+            await WindowsPlaybackTuning.apply(platform, local: plan.local);
           }
           await platform.setProperty(
             'demuxer-lavf-o',

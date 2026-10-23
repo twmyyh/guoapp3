@@ -34,6 +34,7 @@ import 'lan_screen.dart';
 import 'video_enhancement.dart';
 import 'picture_quality_applier.dart';
 import 'video_output_size.dart';
+import 'windows_playback_tuning.dart';
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
@@ -199,9 +200,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     _player =
         widget.playerFactory?.call() ??
         Player(
-          configuration: PlayerConfiguration(
+          // Windows 曾经开 verbose 日志（为了从日志里嗅探 GL 渲染器名），
+          // 但 mpv 每行日志都要跨 FFI 生成一个 PlayerLog 事件回到 Dart，
+          // 播放时每秒上千行，本身就是抖动的来源。渲染环境改由
+          // VideoEnhancementController 按 vo/vo-passes 判定后，这里只留 error。
+          configuration: const PlayerConfiguration(
             bufferSize: 32 * 1024 * 1024,
-            logLevel: Platform.isWindows ? MPVLogLevel.v : MPVLogLevel.error,
+            logLevel: MPVLogLevel.error,
           ),
         );
     _video = widget.videoBuilder == null
@@ -1109,7 +1114,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             await platform.setProperty('video-sync', 'audio');
             await platform.setProperty('framedrop', 'vo');
           } else if (Platform.isWindows) {
-            await platform.setProperty('hwdec', 'd3d11va-copy');
+            await WindowsPlaybackTuning.apply(platform, local: plan.local);
           }
           await platform.setProperty(
             'demuxer-lavf-o',

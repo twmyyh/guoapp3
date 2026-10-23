@@ -44,6 +44,11 @@ class PictureQualityApplier {
 
   PictureQualityPreferences _current = const PictureQualityPreferences();
 
+  /// 最近一次**成功**落地的档位。切集 / 尺寸变化会让 `videoParams` 反复触发，
+  /// 同档位重复 clear + add 会重建 mpv 的滤镜链，渲染管线会闪一下，
+  /// 开播瞬间尤其容易表现为卡顿或半帧花屏，故用它对账。
+  PictureQualityPreferences? _applied;
+
   PictureQualityPreferences get preferences => _current;
 
   /// 非原生（libmpv）播放器时安全空转。
@@ -72,6 +77,7 @@ class PictureQualityApplier {
       return;
     }
     if (_closed || _playerDisposed) return;
+    if (value == _applied && _effectsMounted(mpv, value)) return;
     _clearOwnEffects();
     try {
       switch (value.mode) {
@@ -82,9 +88,31 @@ class PictureQualityApplier {
         case PictureQualityMode.anime4k:
           await _applyAnime4K(mpv);
       }
+      _applied = value;
     } catch (_) {
       // 增强不可用：清掉刚加的效果，退化为原画，不阻断播放。
       _clearOwnEffects();
+      _applied = null;
+    }
+  }
+
+  /// 当前档位的效果是否仍挂在 mpv 上（别的模块可能把人清掉）。
+  bool _effectsMounted(
+    VideoEnhancementMpv mpv,
+    PictureQualityPreferences value,
+  ) {
+    switch (value.mode) {
+      case PictureQualityMode.original:
+        return !_sharpenActive && !_animeActive;
+      case PictureQualityMode.sharpen:
+        if (!_sharpenActive) return false;
+        final filters = mpv.read('vf');
+        return filters is List &&
+            filters.any((item) => item is Map && item['label'] == _filterLabel);
+      case PictureQualityMode.anime4k:
+        final shader = _ownedAnimeShader;
+        if (!_animeActive || shader == null) return false;
+        return _shaderList(mpv).contains(shader);
     }
   }
 

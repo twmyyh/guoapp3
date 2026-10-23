@@ -2,9 +2,23 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.3+96（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.4+97（未验证开发快照）**。
 
-本轮（1.4.3+96）集中处理自定义源的四项优化，全部落在共享 Go 核心 `native/core/provider_custom_maccms.go`——Android / iOS / macOS / Windows 四端 App 与本地 Web 服务器版都经 `core.NativeRequest` 调它，改核心即全平台生效；Flutter 侧无副本。
+本轮（1.4.4+97）参照 guoappxxx 项目的 Windows 播放调优结论，集中处理 **Windows 桌面端播放卡顿与花屏**。改动全部在 Flutter 侧（`lib/`），不影响 Android / iOS / macOS 与本地 Web 服务版。五处：
+
+1. **移除 Windows「硬件增强（d3d11vpp）」档**（`lib/video_enhancement_policy.dart`、`lib/video_enhancement.dart`）。该档用 `vf add d3d11vpp=scale=...:format=nv12` 让显卡驱动做缩放，但 Windows 的硬解自 guoappxxx 起已改为 `d3d11va-copy`（解码后拷回系统内存），帧不再留在 GPU 上的 D3D11 纹理里，`d3d11vpp` 拿不到可处理的输入，轻则整档失效、重则画面撕裂 / 绿边花屏。参考文献项目的结论直接删除该档：枚举值 `VideoEnhancementBackend.hardware`、「清晰优先」模式的命中分支、`_hardwareFramesChanged()` 生效确认、`_failBackend` 的特殊降档、状态文案与 `_vendor`/`_filterLabel` 相关遗留一并清除。删档后「清晰优先」在真人片上落到 `fsrcnnx`（神经超分）或 `ravu`，行为与 guoappxxx 一致。
+
+2. **Windows 关闭 libmpv verbose 日志**（`lib/player_screen.dart`、`lib/xigua/xigua_player_screen.dart`）。此前 `logLevel` 在 Windows 上特意开到 `MPVLogLevel.v`，为了从 `vo/gpu` 日志里嗅探 `GL_VENDOR` 判断显卡厂商。代价是 mpv 每一行日志都要跨 FFI 生成一个 `PlayerLog` 事件回 Dart，播放时每秒上千行，本身就成了抖动的来源。改为全平台 `MPVLogLevel.error`。
+
+3. **修正渲染环境判定，增强不再「永远是原画」**（`lib/video_enhancement.dart`）。`_gpu` 原判定是 `vo == 'libmpv' && (_renderer.isNotEmpty || passes is Map)`，而 `_renderer` 只有 verbose 日志才有，第 2 项关掉 verbose 后 Windows 会永久判为软件渲染、画质增强整条失效（guoappxxx 0.2.72 修过同一个坑）。改为 `vo == 'libmpv' && (Platform.isWindows || _renderer.isNotEmpty || passes is Map)`：Windows 上 `vo` 恒为 libmpv，直接认定 GPU 管线可用，真正的软件渲染仍由 `_softwareRenderer` 否决。同时给着色器档加兜底确认——拿不到 `vo-passes` 时（关掉 verbose 后很常见）改用「着色器是否还挂在 `glsl-shaders` 上」判定生效，避免 `_confirmationMisses` 累计 5 次后把增强误降成原画。
+
+4. **新增 `lib/windows_playback_tuning.dart`，Windows 端 mpv 参数收敛到一处**。原来 guo 播放器只有一行 `hwdec=d3d11va-copy`，xigua 播放器在 Windows 上**根本没设硬解**（走 media_kit 默认 `hwdec=auto`，即零拷贝 `d3d11va`，正是绿边 / 花屏的来源）。新模块由两个播放器共用，在 `Player.open` 之前下发：`hwdec=d3d11va-copy`（零拷贝互操作在部分 NVIDIA / Intel 驱动上会绿边花屏，copy 最稳）；`cache-on-disk=no`（网络流缓存不落盘，避免磁盘 I/O 抖动变成卡顿）；`hr-seek=no`（流式源上精确寻址要等目标帧重新解码，拖进度条会明显卡住，改关键帧寻址即时响应）；`cache-secs=20` / `demuxer-readahead-secs=20`（短剧单集小，内存缓存足够，网络抖动不再直接打进画面）；`framedrop=vo` + `video-sync=audio`（显卡跟不上时丢帧而不是把 A/V 延迟越拖越长）。单个属性不被当前 libmpv 版本识别时跳过，不影响其余项。
+
+5. **同档位不重复重建滤镜链**（`lib/picture_quality_applier.dart`）。该应用器监听 `videoParams`，片源尺寸每次变化（切集、窗口拉伸、开播时参数分几次到齐）都会 `clear + re-add` 一遍效果；`vf remove/add` 会重建 mpv 滤镜链，渲染管线会闪一下，开播瞬间容易看成卡顿或半帧花屏。新增「档位 + 效果是否仍挂载」对账，档位没变且效果还在就直接跳过。
+
+验证：`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning，余下 110 条均为既有 info 级 lint（`curly_braces_in_flow_control_structures` 等风格项，改动文件未新增）；`dart format` 已对六个改动文件跑过。本机无 MSVC 工具链、`flutter test` 播放器用例耗时过长未跑完，Windows 包与测试交由 GitHub Actions 构建，真机流畅度与花屏改善待重新安装后验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.3+96）集中处理自定义源的四项优化，全部落在共享 Go 核心 `native/core/provider_custom_maccms.go`——Android / iOS / macOS / Windows 四端 App 与本地 Web 服务器版都经 `core.NativeRequest` 调它，改核心即全平台生效；Flutter 侧无副本。
 
 1. 自定义源去除 32 个数量上限。删除 `customSourceMaxCount=32` 常量与 `add()` 里的数量检查，自定义源不再有数量限制（规则内容 256KB、导入文件 8MB 的单条 / 单文件上限保持不变）。
 2. 「加速链接 + 网址」拼接地址作为整体识别处理。此前 `customSourceImportBase` 会把任何地址收敛成 `scheme://host`，形如 `https://cfkua.wokaotianshi.eu.org/https://caiji.maotaizy.cc` 这类「加速域名 / 真实网址」拼接串会被截成 `https://cfkua.wokaotianshi.eu.org`，丢掉拼接部分导致取流指向错误的加速域名。新增 `isSplicedAcceleratorURL()`：当字符串出现第二个 `://` 且 `url.Parse` 后路径本身以 `http(s)://` 开头即判为拼接形态，`customSourceImportBase` 命中时整体保留（去尾 `/`），普通 maccms api / 裸域名仍按旧逻辑收敛到站点根，避免误判。
