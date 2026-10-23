@@ -632,7 +632,25 @@ func customSourceImportBase(base, rule string) string {
 	if err != nil || parsed.Host == "" {
 		return ""
 	}
+	// MacCMS 采集端点（路径含 /api.php 或 /provide/vod，如 .../provide/vod/at/xml、.../at/json）
+	// 整体保留完整 URL：运行期 maccmsAPIEndpointCandidates 会把「base 本身」排在候选最前
+	// 直连探测，从而直接命中该采集接口（含 at/xml 的 XML 形态）。否则收敛成站点根会丢掉
+	// 端点路径，at/xml 这种站点默认只返回 XML 的接口就探不到、误判为不可用。
+	// 纯网页站点（路径无采集端点特征）仍收敛成站点根，保留原有网页模板兜底行为。
+	if isMaccmsCollectionEndpoint(base) {
+		return strings.TrimRight(base, "/")
+	}
 	return parsed.Scheme + "://" + parsed.Host
+}
+
+// isMaccmsCollectionEndpoint 判断 base 是否为 MacCMS 采集接口端点 URL：
+// 路径里出现 /api.php 或 /provide/vod 即认（覆盖 at/xml、at/json、/from/m3u8 等子路径）。
+func isMaccmsCollectionEndpoint(base string) bool {
+	path := base
+	if index := strings.Index(base, "?"); index >= 0 {
+		path = base[:index]
+	}
+	return strings.Contains(path, "/api.php") || strings.Contains(path, "/provide/vod")
 }
 
 // isSplicedAcceleratorURL 判断是否为「加速链接 + 网址」拼接形态。

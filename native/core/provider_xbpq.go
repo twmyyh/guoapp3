@@ -1251,6 +1251,18 @@ func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, 
 		items = append(items, xbpqItem{text: segment, doc: document})
 	}
 	if len(items) == 0 {
+		// 通用兜底：主 数组 模式截不到时尝试 <li>/<a>/<article> 通用容器，
+		// 提升对未覆盖站点结构的适应性（模板未命中或 pattern 与实际 HTML 不符时救场）。
+		for _, fallback := range []string{"<li&&</li>", "<a &&</a>", "<article&&</article>", "class=\"item\"&&</div>", "class=\"card\"&&</div>"} {
+			if extra := xbpqList(body, fallback); len(extra) > 0 {
+				for _, seg := range extra {
+					items = append(items, xbpqItem{text: seg, doc: document})
+				}
+				break
+			}
+		}
+	}
+	if len(items) == 0 {
 		if jsonItems := xbpqJSONList(body, rule, prefix); len(jsonItems) > 0 {
 			return jsonItems
 		}

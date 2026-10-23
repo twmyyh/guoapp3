@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"net/url"
 	"regexp"
@@ -10,6 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,18 +50,40 @@ type maccmsAPIEndpointEntry struct {
 var maccmsAPIStatusPattern = regexp.MustCompile(`HTTP (\d{3})`)
 
 // maccmsAPIEndpointCandidates 罗列常见的 API 挂载位置，逐个探测。
+// 若 base 本身已是完整采集端点（含 /provide/vod 或 /api.php，如导入保留下来的
+// .../provide/vod/at/xml），base 原样排在最前并补 JSON/XML 格式变体，
+// 站点根形态才走通用挂载位置探测。
 func maccmsAPIEndpointCandidates(base string) []string {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
 		return nil
 	}
-	return []string{
-		base + "/api.php/provide/vod/",
-		base + "/api.php/provide/vod",
-		base + "/inc/api.php/provide/vod/",
-		base + "/api.php/provide/vod/from/m3u8/",
-		base + "/api.php/app/vod/",
+	candidates := make([]string, 0, 8)
+	if strings.Contains(base, "/provide/vod") || strings.Contains(base, "/api.php") {
+		candidates = append(candidates, base)
+		if !strings.Contains(base, "/at/") {
+			candidates = append(candidates, base+"/at/json", base+"/at/xml")
+		}
 	}
+	candidates = append(candidates,
+		base+"/api.php/provide/vod/",
+		base+"/api.php/provide/vod",
+		base+"/inc/api.php/provide/vod/",
+		base+"/api.php/provide/vod/at/json",
+		base+"/api.php/provide/vod/at/xml",
+		base+"/api.php/provide/vod/from/m3u8/",
+		base+"/api.php/app/vod/",
+	)
+	seen := map[string]bool{}
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		unique = append(unique, candidate)
+	}
+	return unique
 }
 
 // maccmsAPIEndpointFor 返回该站源可用的 API 地址，空串表示当前判定不支持。
@@ -104,20 +131,38 @@ func (d *Downloader) maccmsAPIProbeOnce(ctx context.Context, candidate, base str
 		return "", maccmsAPIErrorDefinitive(err)
 	}
 	body = strings.TrimSpace(body)
-	if !strings.HasPrefix(body, "{") {
-		return "", true // 站点有响应但不是 JSON API：确定不支持
+	if strings.HasPrefix(body, "{") {
+		var payload map[string]any
+		if json.Unmarshal([]byte(body), &payload) != nil {
+			return candidate, false // JSON 却解析失败：形态可疑，不缓存负面结论
+		}
+		if _, hasList := payload["list"]; hasList {
+			return candidate, false // list 键存在即认 API（空列表只是暂无数据）
+		}
+		if _, hasData := payload["data"]; hasData {
+			return candidate, false
+		}
+		return "", true
 	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(body), &payload) != nil {
-		return candidate, false // JSON 却解析失败：形态可疑，不缓存负面结论
-	}
-	if _, hasList := payload["list"]; hasList {
-		return candidate, false // list 键存在即认 API（空列表只是暂无数据）
-	}
-	if _, hasData := payload["data"]; hasData {
+	// 采集接口可返回 XML（MacCMS at/xml 形态）：识别到 list / class / video 标签即认 API。
+	if strings.HasPrefix(body, "<") && maccmsAPIXMLLooksLike(body) {
 		return candidate, false
 	}
-	return "", true
+	return "", true // 有响应但既非 JSON 也非 MacCMS XML：确定不支持
+}
+
+// maccmsAPIXMLLooksLike 粗判一段文本是否为 MacCMS 采集 XML（含视频/分类/列表任一结构标签）。
+func maccmsAPIXMLLooksLike(body string) bool {
+	probe := body
+	if len(probe) > 4096 {
+		probe = probe[:4096]
+	}
+	for _, marker := range []string{"<list", "<video", "<class", "<ty ", "<ty>", "<?xml"} {
+		if strings.Contains(probe, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // maccmsAPIErrorDefinitive 判断一次抓取错误是否是「站点明确拒绝」而非临时抖动。
@@ -143,6 +188,10 @@ func maccmsAPIErrorDefinitive(err error) bool {
 }
 
 // maccmsAPICall 请求 API 并解出 list / class，失败时返回错误。
+// 兼容两种响应体：标准 JSON（{"list":[...],"class":[...]}）与 MacCMS 采集 XML
+// (<list pic_domain=".."><video>..</video><class>..</class></list>)，XML 归一化成
+// 与 JSON 同形态的 map（list / class 两个键），下游 maccmsAPIItems / maccmsAPIDrama
+// 等无需感知格式差异。
 func (d *Downloader) maccmsAPICall(ctx context.Context, address, referer string) (map[string]any, error) {
 	body, err := d.fetchProviderText(ctx, address, referer)
 	if err != nil || strings.TrimSpace(body) == "" || len(body) > 8*1024*1024 {
@@ -152,11 +201,22 @@ func (d *Downloader) maccmsAPICall(ctx context.Context, address, referer string)
 		return nil, err
 	}
 	body = strings.TrimSpace(body)
-	if !strings.HasPrefix(body, "{") {
-		return nil, errMaccmsAPIEmpty
-	}
 	var payload map[string]any
-	if json.Unmarshal([]byte(body), &payload) != nil {
+	switch {
+	case strings.HasPrefix(body, "{"):
+		if json.Unmarshal([]byte(body), &payload) != nil {
+			return nil, errMaccmsAPIEmpty
+		}
+	case strings.HasPrefix(body, "<"):
+		xmlBody, _, xmlErr := maccmsAPIDecodeXML(body)
+		if xmlErr != nil {
+			return nil, xmlErr
+		}
+		payload, err = maccmsAPIParseXML(xmlBody)
+		if err != nil {
+			return nil, errMaccmsAPIEmpty
+		}
+	default:
 		return nil, errMaccmsAPIEmpty
 	}
 	if code := maccmsAPIInt(payload["code"]); code == 0 && len(payload) > 1 {
@@ -175,6 +235,197 @@ var errMaccmsAPIEmpty = &maccmsAPIError{"接口未返回可用数据"}
 type maccmsAPIError struct{ message string }
 
 func (e *maccmsAPIError) Error() string { return e.message }
+
+// ---------------------------------------------------------------------------
+// MacCMS 采集 XML（/api.php/provide/vod/at/xml）解析
+//
+// streamhub 那批采集接口几乎全走 at/xml，返回形如：
+//
+//	<?xml version="1.0"?>
+//	<total>99</total><pagecount>5</pagecount>
+//	<list pic_domain="http://img.x.cn"><video>…<vod_play_url>第1集$url#…</vod_play_url></video></list>
+//	<class><ty id="1">电影</ty>…</class>
+//
+// 不同 MacCMS 版本根元素不统一（单根 / 多顶级兄弟 / 无 list 包裹都见过），
+// 故用 xml.Decoder 逐 token 扫描，按 <video> / <class> / <pagecount> 标签抓取，
+// 不依赖具体嵌套结构；再归一化成与 JSON 同形态的 map（list / class / pagecount），
+// 下游 maccmsAPIItems / maccmsAPIDrama / maccmsAPIChapters 无需感知格式差异。
+// ---------------------------------------------------------------------------
+
+type maccmsXMLVideo struct {
+	ID         string `xml:"id"`
+	VodID      string `xml:"vod_id"`
+	Name       string `xml:"name"`
+	VodName    string `xml:"vod_name"`
+	Title      string `xml:"title"`
+	Type       string `xml:"type"`
+	TypeName   string `xml:"type_name"`
+	Remarks    string `xml:"note"`
+	VodRemarks string `xml:"vod_remarks"`
+	Content    string `xml:"des"`
+	VodContent string `xml:"vod_content"`
+	Blurb      string `xml:"vod_blurb"`
+	Actor      string `xml:"actor"`
+	VodActor   string `xml:"vod_actor"`
+	Director   string `xml:"director"`
+	VodDirector string `xml:"vod_director"`
+	Pic        string `xml:"vod_pic"`
+	PicAlt     string `xml:"pic"`
+	Img        string `xml:"vod_img"`
+	ImgAlt     string `xml:"img"`
+	PlayURL    string `xml:"vod_play_url"`
+	URL        string `xml:"vod_url"`
+	DL         struct {
+		Items []string `xml:"dd"`
+	} `xml:"dl"`
+}
+
+type maccmsXMLType struct {
+	ID   string `xml:"id,attr"`
+	Name string `xml:",chardata"`
+}
+
+type maccmsXMLClass struct {
+	Types []maccmsXMLType `xml:"ty"`
+}
+
+// maccmsAPIDecodeXML 归一化 XML 文本编码：MacCMS 采集接口大量输出 GBK/GB18030，
+// 而 fetchProviderText 按响应字节原样返回。UTF-8 合法性不成立时按 GB18030 兜底解码。
+func maccmsAPIDecodeXML(body string) (string, string, error) {
+	if utf8.ValidString(body) {
+		return body, "utf-8", nil
+	}
+	decoded, _, err := transform.String(simplifiedchinese.GB18030.NewDecoder(), body)
+	if err != nil {
+		return "", "", err
+	}
+	return decoded, "gb18030", nil
+}
+
+// maccmsAPIParseXML 把 MacCMS 采集 XML 解析成 {list, class, pagecount} 形态的 map。
+// 逐 token 扫描，兼容单根 / 多顶级兄弟 / 无 list 包裹等结构差异。
+func maccmsAPIParseXML(body string) (map[string]any, error) {
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	var videos []map[string]any
+	var classes []map[string]any
+	pageCount := ""
+	sawClass := false
+	picDomain := ""
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break // 末尾或 malformed：拿到多少算多少
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch start.Name.Local {
+		case "video":
+			var video maccmsXMLVideo
+			if decoder.DecodeElement(&video, &start) != nil {
+				continue
+			}
+			if entry := maccmsXMLVideoToMap(video, picDomain); entry != nil {
+				videos = append(videos, entry)
+			}
+		case "class":
+			if sawClass {
+				_ = decoder.Skip()
+				continue
+			}
+			var class maccmsXMLClass
+			if decoder.DecodeElement(&class, &start) == nil {
+				sawClass = true
+				for _, ty := range class.Types {
+					id := strings.TrimSpace(ty.ID)
+					name := strings.TrimSpace(ty.Name)
+					if id == "" || name == "" {
+						continue
+					}
+					classes = append(classes, map[string]any{"type_id": id, "type_name": name})
+				}
+			}
+		case "list":
+			// 只记录 pic_domain 供图片补全，不消费子树（继续下探 <video>）。
+			for _, attr := range start.Attr {
+				if attr.Name.Local == "pic_domain" || attr.Name.Local == "vod_pic_domain" {
+					picDomain = strings.TrimSpace(attr.Value)
+				}
+			}
+		case "pagecount", "page_count", "pageCount":
+			var text string
+			if decoder.DecodeElement(&text, &start) == nil {
+				pageCount = strings.TrimSpace(text)
+			}
+		}
+	}
+	payload := map[string]any{}
+	if len(videos) > 0 {
+		list := make([]any, 0, len(videos))
+		for _, video := range videos {
+			list = append(list, video)
+		}
+		payload["list"] = list
+	}
+	if len(classes) > 0 {
+		classRows := make([]any, 0, len(classes))
+		for _, class := range classes {
+			classRows = append(classRows, class)
+		}
+		payload["class"] = classRows
+	}
+	if pageCount != "" {
+		payload["pagecount"] = pageCount
+	}
+	if len(payload) == 0 {
+		return nil, errors.New("XML 无可识别的视频或分类内容")
+	}
+	return payload, nil
+}
+
+// maccmsXMLVideoToMap 把一个 <video> 转成 maccmsAPIDrama 认识的键值；
+// 缺主键/标题/分集地址任一即判无效返回 nil。picDomain 存在且图片为相对路径时按
+// 图片域补全（对齐 streamhub formatImageUrl 的 pic_domain 处理）。
+func maccmsXMLVideoToMap(video maccmsXMLVideo, picDomain string) map[string]any {
+	id := firstNonEmpty(video.VodID, video.ID)
+	name := firstNonEmpty(video.VodName, video.Name, video.Title)
+	if id == "" || name == "" {
+		return nil
+	}
+	pic := firstNonEmpty(video.Pic, video.PicAlt, video.Img, video.ImgAlt)
+	if picDomain != "" && pic != "" && !strings.Contains(pic, "://") {
+		if strings.HasPrefix(pic, "/") {
+			pic = strings.TrimRight(picDomain, "/") + pic
+		} else {
+			pic = strings.TrimRight(picDomain, "/") + "/" + pic
+		}
+	}
+	playURL := firstNonEmpty(video.PlayURL, video.URL)
+	if playURL == "" && len(video.DL.Items) > 0 {
+		parts := make([]string, 0, len(video.DL.Items))
+		for _, raw := range video.DL.Items {
+			if text := strings.TrimSpace(raw); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		playURL = strings.Join(parts, "$$$")
+	}
+	if playURL == "" {
+		return nil
+	}
+	return map[string]any{
+		"vod_id":       id,
+		"vod_name":     name,
+		"vod_pic":      pic,
+		"type_name":    firstNonEmpty(video.TypeName, video.Type),
+		"vod_remarks":  firstNonEmpty(video.VodRemarks, video.Remarks),
+		"vod_content":  firstNonEmpty(video.VodContent, video.Content, video.Blurb),
+		"vod_actor":    firstNonEmpty(video.VodActor, video.Actor),
+		"vod_director": firstNonEmpty(video.VodDirector, video.Director),
+		"vod_play_url": playURL,
+	}
+}
 
 // maccmsAPIItems 取出 list（或 data）里的条目。
 func maccmsAPIItems(payload map[string]any) []map[string]any {
@@ -353,18 +604,15 @@ func maccmsAPIRouteGroups(item map[string]any) [][]maccmsAPIEpisode {
 	return routes
 }
 
-// maccmsAPIChapters 取「集数最全」的那条线路；并列时取靠前的一条。
+// maccmsAPIChapters 选播放线路后取分集。线路优先级对齐 streamhub 的 parsePlayUrl：
+// 1) 优先取含 .m3u8 的线路（HLS 直链最稳）；2) 其次含 .mp4 的线路；
+// 3) 都没有时退化为「分集最多」，并列取靠前。保证选到的是能直接播放的真链接。
 func maccmsAPIChapters(source, base, sourceID string, item map[string]any) []Chapter {
 	routes := maccmsAPIRouteGroups(item)
 	if len(routes) == 0 {
 		return nil
 	}
-	best := 0
-	for index, route := range routes {
-		if len(route) > len(routes[best]) {
-			best = index
-		}
-	}
+	best := maccmsAPIBestRouteIndex(routes)
 	detail := base + "/index.php/vod/detail/id/" + sourceID + ".html"
 	chapters := make([]Chapter, 0, len(routes[best]))
 	for index, episode := range routes[best] {
@@ -373,6 +621,33 @@ func maccmsAPIChapters(source, base, sourceID string, item map[string]any) []Cha
 	}
 	sortDuanjuChapters(chapters)
 	return chapters
+}
+
+// maccmsAPIBestRouteIndex 按 streamhub 的线路优先级挑一条线路下标：
+// 先找含 .m3u8 的、再找含 .mp4 的，否则取分集数最多的（并列取靠前）。
+func maccmsAPIBestRouteIndex(routes [][]maccmsAPIEpisode) int {
+	contains := func(index int, marker string) bool {
+		for _, episode := range routes[index] {
+			if strings.Contains(strings.ToLower(episode.URL), marker) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, marker := range []string{".m3u8", ".mp4"} {
+		for index := range routes {
+			if contains(index, marker) {
+				return index
+			}
+		}
+	}
+	best := 0
+	for index, route := range routes {
+		if len(route) > len(routes[best]) {
+			best = index
+		}
+	}
+	return best
 }
 
 // fetchMaccmsAPICategories 取分类（ac=list 或直接取 videolist 带回的 class）。
