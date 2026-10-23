@@ -54,8 +54,12 @@ func detectFFmpeg() string {
 }
 
 const (
-	jobIdleTTL   = 30 * time.Minute
-	jobReadyWait = 15 * time.Second
+	jobIdleTTL = 30 * time.Minute
+	// jobFastWait：handlePlay 为「第一个 HLS 分片」最多阻塞多久，未就绪即退回让前端 Hls.js
+	// 自行重试清单。3s 足够抓住 ffmpeg 的早期启动失败（缺二进制 / 解密密钥错 / 输入读不到都
+	// 会在 1s 内崩，done 通道立刻带回错误）；未就绪的「正在编码」场景不再让页面卡到 15s，
+	// 交给前端已内置的清单重试（首字节 60s / 超时·错误各 3 轮）接管，播放页打开显著更快。
+	jobFastWait = 3 * time.Second
 )
 
 type transcodeJob struct {
@@ -190,12 +194,28 @@ func (manager *transcodeManager) start(key, input, decryptionKey string) (*trans
 	return job, nil
 }
 
-// wait 等到第一个分片就绪；转码失败会立刻返回错误，慢机器上最多等 jobReadyWait。
+// wait 等到第一个分片就绪（最多 jobFastWait 的短窗口）；转码启动失败会立刻返回错误。
+// 超过短窗口仍未出分片不判失败，而是交给前端 Hls.js 的清单重试去接管——
+// 避免 handlePlay 在关键路径上长时间阻塞播放页打开。
 func (manager *transcodeManager) wait(job *transcodeJob) (bool, string) {
 	if job.ready() {
 		return true, ""
 	}
-	timer := time.NewTimer(jobReadyWait)
+	// 先做一次「启动即崩」的快检：早期启动失败（缺 ffmpeg / 解密密钥错 / 输入打不开）
+	// ffmpeg 会在 ~1s 内退出，done 通道立即带回错误，这里能直接报出明确失败。
+	select {
+	case <-job.done:
+		if job.ready() {
+			return true, ""
+		}
+		if message := job.failure(); message != "" {
+			return false, message
+		}
+		// 进程已结束却没产出分片也没报错：极罕见，按「未就绪」交给前端重试。
+		return false, ""
+	default:
+	}
+	timer := time.NewTimer(jobFastWait)
 	defer timer.Stop()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()

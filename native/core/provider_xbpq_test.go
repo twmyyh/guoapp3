@@ -247,7 +247,7 @@ func TestXBPQGBKDecodeAndLongText(t *testing.T) {
 
 func TestXBPQCustomSourceRegistration(t *testing.T) {
 	registry := newCustomMaccmsRegistry(t.TempDir())
-	record, err := registry.add("", "", xbpqCutRuleJSON)
+	record, err := registry.add("", "", xbpqCutRuleJSON, "")
 	if err != nil {
 		t.Fatalf("规则源录入失败: %v", err)
 	}

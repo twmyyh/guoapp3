@@ -138,12 +138,14 @@ abstract class AppRepository {
     required String name,
     required String base,
     String rule = '',
+    String kind = '',
   }) async => throw AppFailure('当前环境不支持自定义源');
   Future<CustomSourceSite> updateCustomSource(
     String id, {
     required String name,
     required String base,
     String rule = '',
+    String kind = '',
   }) async => throw AppFailure('当前环境不支持自定义源');
   Future<void> removeCustomSource(String id) async =>
       throw AppFailure('当前环境不支持自定义源');
@@ -507,6 +509,7 @@ class NativeRepository extends AppRepository {
     required String name,
     required String base,
     String rule = '',
+    String kind = '',
   }) async {
     _adminPermission();
     final result = await _call({
@@ -514,6 +517,7 @@ class NativeRepository extends AppRepository {
       'name': name,
       'base': base,
       'rule': rule,
+      'kind': kind,
     });
     return CustomSourceSite.fromJson(Map<String, dynamic>.from(result as Map));
   }
@@ -524,6 +528,7 @@ class NativeRepository extends AppRepository {
     required String name,
     required String base,
     String rule = '',
+    String kind = '',
   }) async {
     _adminPermission();
     final result = await _call({
@@ -532,6 +537,7 @@ class NativeRepository extends AppRepository {
       'name': name,
       'base': base,
       'rule': rule,
+      'kind': kind,
     });
     return CustomSourceSite.fromJson(Map<String, dynamic>.from(result as Map));
   }

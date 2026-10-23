@@ -653,8 +653,12 @@ func customSourceRecords() []map[string]any {
 
 // customSourceAction 新增或更新自定义源。核心记录放在 data 字段；失败时
 // 返回核心的真实错误（如"该网址已存在"），供前端原样展示而不是被当成乱码。
-func customSourceAction(action, id, name, base, rule string) (map[string]any, error) {
+// kind 为源类型：web / json / 空=自动（核心侧据此走直连 API 或先探测再兜底）。
+func customSourceAction(action, id, name, base, rule, kind string) (map[string]any, error) {
 	payload := map[string]any{"action": action, "name": name, "base": base, "rule": rule}
+	if kind != "" {
+		payload["kind"] = kind
+	}
 	if id != "" {
 		payload["source"] = id
 	}
@@ -856,12 +860,13 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 			Name string `json:"name"`
 			Base string `json:"base"`
 			Rule string `json:"rule"`
+			Kind string `json:"kind"`
 		}{}
 		if json.Unmarshal(body, &payload) != nil {
 			customSourceError(writer, "请求不是合法 JSON")
 			return
 		}
-		record, err := customSourceAction("addCustomSource", "", payload.Name, payload.Base, payload.Rule)
+		record, err := customSourceAction("addCustomSource", "", payload.Name, payload.Base, payload.Rule, payload.Kind)
 		if err != nil {
 			customSourceError(writer, err.Error())
 			return
@@ -885,12 +890,13 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 			Name string `json:"name"`
 			Base string `json:"base"`
 			Rule string `json:"rule"`
+			Kind string `json:"kind"`
 		}{}
 		if json.Unmarshal(body, &payload) != nil {
 			customSourceError(writer, "请求不是合法 JSON")
 			return
 		}
-		record, err := customSourceAction("updateCustomSource", id, payload.Name, payload.Base, payload.Rule)
+		record, err := customSourceAction("updateCustomSource", id, payload.Name, payload.Base, payload.Rule, payload.Kind)
 		if err != nil {
 			customSourceError(writer, err.Error())
 			return

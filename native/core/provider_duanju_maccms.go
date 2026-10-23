@@ -477,10 +477,29 @@ func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string
 	if rule, ok := customXBPQRule(source); ok {
 		return d.xbpqCatalog(ctx, source, base, page, category, rule)
 	}
-	// 标准 JSON API 优先：命中就不必再猜页面模板。
-	if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
-		if items, hasMore, err := d.fetchMaccmsAPICatalog(ctx, source, endpoint, base, page, category); err == nil {
-			return items, hasMore, nil
+	// 源类型路由：配置里显式声明了 web / json 时快速直达对应处理模块，
+	// 跳过自动模式的逐次探测（JSON API 探测 / 模板家族识别）。
+	kind := customSourceTypeFor(source)
+	switch kind {
+	case customSourceTypeJSON:
+		// JSON 源：直接走 MacCMS JSON API 模块，API 不可用不回落网页模板猜测。
+		endpoint := maccmsAPIEndpointFor(ctx, d, source, base)
+		if endpoint == "" {
+			return nil, false, errors.New("源类型标注为 JSON，但未探测到 MacCMS API 端点，请核对站点地址或改回自动识别")
+		}
+		items, hasMore, err := d.fetchMaccmsAPICatalog(ctx, source, endpoint, base, page, category)
+		if err != nil {
+			return nil, false, fmt.Errorf("JSON 源目录获取失败：%w", err)
+		}
+		return items, hasMore, nil
+	case customSourceTypeWeb:
+		// 网页源：不做 JSON API 探测（对纯网页站是无效开销），落到下方网页模板模块。
+	default:
+		// 自动：标准 JSON API 优先，命中就不必再猜页面模板。
+		if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+			if items, hasMore, err := d.fetchMaccmsAPICatalog(ctx, source, endpoint, base, page, category); err == nil {
+				return items, hasMore, nil
+			}
 		}
 	}
 	if page <= 1 && strings.TrimSpace(category) == "" {
@@ -586,12 +605,32 @@ func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID str
 	}
 	candidates := maccmsDetailCandidates(source, base, sourceID)
 	if isCustomMaccmsSource(source) {
-		// 标准 JSON API 优先：详情与播放地址一次拿全，省掉播放页解析。
-		if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
-			if drama, chapters, apiErr := d.fetchMaccmsAPIDetail(ctx, source, endpoint, base, sourceID); apiErr == nil {
-				return drama, chapters, nil
+		// 源类型路由：
+		//  - json 源：直走 MacCMS JSON API 模块（详情与播放地址一次拿全），失败不回落网页
+		//    模板猜测（网页猜测对 JSON 站无意义且拖慢），直接报「JSON 接口不可用」。
+		//  - web 源：跳过 JSON API 探测（对纯网页站是无效开销），直接走网页模板模块。
+		//  - 自动（空）：标准 JSON API 优先，命中就不必再猜页面模板；未命中回落网页候选。
+		kind := customSourceTypeFor(source)
+		if kind == customSourceTypeJSON {
+			endpoint := maccmsAPIEndpointFor(ctx, d, source, base)
+			if endpoint == "" {
+				return Drama{}, nil, errors.New("源类型标注为 JSON，但未探测到 MacCMS API 端点，请核对站点地址或改回自动识别")
+			}
+			drama, chapters, apiErr := d.fetchMaccmsAPIDetail(ctx, source, endpoint, base, sourceID)
+			if apiErr != nil {
+				return Drama{}, nil, fmt.Errorf("JSON 源详情获取失败：%w", apiErr)
+			}
+			return drama, chapters, nil
+		}
+		if kind != customSourceTypeWeb {
+			// 自动：标准 JSON API 优先，命中就不必再猜页面模板。
+			if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+				if drama, chapters, apiErr := d.fetchMaccmsAPIDetail(ctx, source, endpoint, base, sourceID); apiErr == nil {
+					return drama, chapters, nil
+				}
 			}
 		}
+		// web 源与自动源：走网页模板模块。
 		profile := maccmsCustomProfileFor(ctx, d, source, base)
 		candidates = append(profile.detailCandidates(base, sourceID), candidates...)
 		candidates = append(candidates, fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
