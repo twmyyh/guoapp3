@@ -333,8 +333,10 @@ class PlayerInteractions extends ChangeNotifier {
         _moved &&
         horizontal &&
         _axis == _SwipeAxis.horizontal) {
-      // 左右滑动：一次固定步长快进/快退。
+      // 左右滑动：一次固定步长快进/快退。预览 HUD 只在该手势期间有效，
+      // 抬手完成 seek 后立刻隐藏，不留残影；确认提示交给 hint 的自动淡出。
       seek(delta.dx > 0 ? seekStep : -seekStep);
+      _dismissHud();
     } else if (_swipeEnabled &&
         _moved &&
         vertical &&
@@ -375,9 +377,19 @@ class PlayerInteractions extends ChangeNotifier {
     _hudTimer?.cancel();
     _hudTimer = Timer(const Duration(milliseconds: 1000), () {
       if (_disposed) return;
+      _dismissHud();
+    });
+  }
+
+  /// 立即收起手势 HUD（左右滑动快进/快退抬手时用，不留残影）。
+  void _dismissHud() {
+    if (_disposed) return;
+    _hudTimer?.cancel();
+    _hudTimer = null;
+    if (_hudState.type != SwipeAction.none) {
       _hudState = const GestureHudState();
       notifyListeners();
-    });
+    }
   }
 
   void seek(int seconds) {

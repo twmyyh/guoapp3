@@ -329,10 +329,13 @@ void main() {
     await swipe(const Offset(400, 200), const Offset(560, 200));
     expect(player.state.position, const Duration(seconds: 15));
     expect(interactions.feedback, contains('快进'));
+    // 抬手完成 seek 后，预览 HUD 应立即消失，不残留在屏幕上。
+    expect(interactions.hudState.type, SwipeAction.none);
 
     await swipe(const Offset(400, 200), const Offset(240, 200));
     expect(player.state.position, Duration.zero);
     expect(interactions.feedback, contains('后退'));
+    expect(interactions.hudState.type, SwipeAction.none);
 
     interactions.dispose();
     await player.dispose();
