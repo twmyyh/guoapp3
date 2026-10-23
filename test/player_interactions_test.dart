@@ -120,6 +120,8 @@ void main() {
       height: 400,
       width: 800,
     );
+    // 亮度必须先长按（350ms）才出来，短促滑动属于切集。
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     await Future<void>.delayed(Duration.zero);
     expect(interactions.hudState.type, SwipeAction.brightness);
 
@@ -226,6 +228,111 @@ void main() {
     await flick(const Offset(600, 100), const Offset(600, 300));
     expect(directions, [1, -1]);
     expect(brightnessCalls, isEmpty);
+
+    interactions.dispose();
+    await player.dispose();
+  });
+
+  test('左侧短促上下滑动同样是切集，不进亮度', () async {
+    final platform = ScriptedPlayer();
+    final player = Player(platformPlayer: platform);
+    await platform.open(Media('https://media.test/working.mp4'));
+    final directions = <int>[];
+    final interactions = build(player, onEpisode: directions.add);
+
+    Future<void> flick(Offset from, Offset to) async {
+      interactions.pointerDown(
+        PointerDownEvent(
+          pointer: 1,
+          position: from,
+          buttons: kPrimaryButton,
+          kind: PointerDeviceKind.touch,
+          timeStamp: Duration.zero,
+        ),
+        swipeEnabled: true,
+        height: 400,
+        width: 800,
+      );
+      interactions.pointerMove(
+        PointerMoveEvent(
+          pointer: 1,
+          position: to,
+          buttons: kPrimaryButton,
+          kind: PointerDeviceKind.touch,
+          timeStamp: const Duration(milliseconds: 120),
+        ),
+      );
+      interactions.pointerUp(
+        PointerUpEvent(
+          pointer: 1,
+          position: to,
+          buttons: 0,
+          kind: PointerDeviceKind.touch,
+          timeStamp: const Duration(milliseconds: 160),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    // 起点 x=100 落在左侧 35% 内，但没有长按，所以走切集而不是亮度。
+    await flick(const Offset(100, 300), const Offset(100, 100));
+    expect(directions, [1]);
+    expect(interactions.hudState.type, isNot(SwipeAction.brightness));
+    expect(brightnessCalls, isEmpty);
+
+    interactions.dispose();
+    await player.dispose();
+  });
+
+  test('左右滑动按 15 秒步长快进快退', () async {
+    final platform = ScriptedPlayer();
+    final player = Player(platformPlayer: platform);
+    await platform.open(Media('https://media.test/working.mp4'));
+    final interactions = build(player);
+
+    Future<void> swipe(Offset from, Offset to) async {
+      interactions.pointerDown(
+        PointerDownEvent(
+          pointer: 1,
+          position: from,
+          buttons: kPrimaryButton,
+          kind: PointerDeviceKind.touch,
+          timeStamp: Duration.zero,
+        ),
+        swipeEnabled: true,
+        height: 400,
+        width: 800,
+      );
+      interactions.pointerMove(
+        PointerMoveEvent(
+          pointer: 1,
+          position: to,
+          buttons: kPrimaryButton,
+          kind: PointerDeviceKind.touch,
+          timeStamp: const Duration(milliseconds: 120),
+        ),
+      );
+      expect(interactions.hudState.type, SwipeAction.seek);
+      expect(interactions.hudState.label, contains('15 秒'));
+      interactions.pointerUp(
+        PointerUpEvent(
+          pointer: 1,
+          position: to,
+          buttons: 0,
+          kind: PointerDeviceKind.touch,
+          timeStamp: const Duration(milliseconds: 160),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    await swipe(const Offset(400, 200), const Offset(560, 200));
+    expect(player.state.position, const Duration(seconds: 15));
+    expect(interactions.feedback, contains('快进'));
+
+    await swipe(const Offset(400, 200), const Offset(240, 200));
+    expect(player.state.position, Duration.zero);
+    expect(interactions.feedback, contains('后退'));
 
     interactions.dispose();
     await player.dispose();

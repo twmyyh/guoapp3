@@ -2,7 +2,7 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.0+101（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.1+102（未验证开发快照）**。
 
 本轮（1.5.0+101）换掉整个播放器实现：**完整移植 guoappxxx 的播放器，删除双播放器选择**。1.4.4~1.4.7 三轮都是在保留本项目播放器的前提下逐项对齐参数，用户实测装包后 Windows 仍然「声音正常、画面跳帧」，两个播放器都卡——说明差异不在某条 mpv 参数，而在播放器整体实现（解码供帧、恢复阶梯、控件与合成层）。因此这一轮不再做参数对齐，而是直接把 guoappxxx 的播放器代码搬到本项目。
 
@@ -19,6 +19,24 @@ Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、�
 6. **随旧播放器下线的模块**。`picture_quality_ui.dart`、`picture_quality_applier.dart`（旧播放器的「画质档」面板与 `unsharp` CPU 滤镜应用器）、`windows_playback_tuning.dart`（上一轮的 Windows mpv 参数收敛，参照版不需要）、`xigua/player_menu.dart`（只被已删除的 xigua 播放页引用）一并删除。`playback_preferences` 里的 `pictureQuality` 字段保留，避免老版本存档解析失败。
 
 验证：`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning。`test/player_screen_test.dart` 按新契约重写 8 例——恢复阶梯（重复错误只刷新一次、刷新 → 备用线路 → 停止、备用线路请求延迟返回时必须丢弃）、长按快进（先让控制条按 4 秒超时退场再长按，2 倍速生效、松开恢复、提示 1.2 秒后消失）、桌面端空闲隐藏 / 鼠标唤出 / 空格暂停 / 方向键回退、手动切集保持可见。播放相关 4 个测试文件共 19 例全绿。全量 `flutter test` 与 HEAD 基线对照：基线 32 例失败、本轮 28 例失败，失败的用例集合是本轮的子集（`widget_test`/`interface_test`/`media_library_test`/`television_player_test` 等既有失败与播放器无关，另 4 例由新播放器顺带修好），无新增失败。本机无 MSVC，Windows 包由 CI 构建，真机是否仍卡需装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.5.0+101）把播放器整体换成了 guoappxxx 的实现，Android 手势与 Windows 卡顿各留一件事，本轮收掉。
+
+1. **Android 手势改成三态**（`lib/player_interactions.dart`、`lib/player_controls.dart`、`lib/playback_preferences.dart`）。移植过来的参照版手势只有两态：落点在左侧 35% 就上下滑调亮度，其余一律上下滑切集，左右滑动没有任何效果。按产品要求重做为：
+
+   - **左侧长按（350ms）再上下滑 = 调亮度**。长按先弹出红果风格亮度条（读 `AppDevice.getBrightness` 作为起点），之后上下滑按「滑动量 / 面板高度 60%」增减，抬手收起；亮度只在 Android 生效（窗口级 `screenBrightness` 覆盖），桌面端自动跳过这条分支，不会出现「有条没效果」的假调节。
+   - **短促上下滑（< 1.5s 且未长按）= 切换上/下一集**，不再看落点，左侧短滑同样是切集。
+   - **左右滑 = 快进/快退固定步长**，默认 **15 秒**（`PlaybackPreferences.swipeSeekSeconds`，可选 15/30/60/120，原默认 60 已改为 15）。滑动途中只在中央浮层给「快进 15 秒 / 后退 15 秒」预览，**抬手才真正 seek**，避免一次滑动里连续跳转把解码器拖死。
+
+   方向在首次越过 16px 时锁定（`_SwipeAxis`），之后不再改判，斜着划不会在切集和快进之间来回跳；已进入亮度档后左右滑也不再改判成快进。新增 `SwipeAction.seek` 与 HUD 的快进/后退分支（图标 + 文案）。
+
+2. **去掉「播放中顺序预取」，把数据路径对齐参照版**（`native/core/app_stream.go`）。播放器已经和 guoappxxx 逐行一致，于是把对照范围收到 Go 流代理：`app_preload.go`（开播预热 `nativePrefetch`）两项目**完全相同**，差异只剩 `app_stream.go`，而它的差异只有三处——参照版的诊断埋点、本项目的去广告清洗、以及**本项目独有的 `nativeWarmAhead`**。
+
+   `nativeWarmAhead` 是「播放器每请求一个分片，就后台再拉后续分片并整片读进内存」。1.4.7 已给它加了三条边界（单片 ≤3MB、会话封顶 24MB、窗口降为一片），但**参照项目根本不存在这一层**：它只有开播那一次预热。触发点正好在每个分片边界上——后台预取与播放器正在拉的那一片抢同一条连接预算，站源一限速就把当前分片拖慢，观感就是「播几秒就顿一下」，而且每几秒来一次。本轮直接删掉 `nativeWarmAhead` / `nativeWarmSegment` 及配套的 `order` / `warming` / `warmSkip` / `warmed` 状态和常量，播放路径与参照版一致；开播预热 `nativePrefetch`（4MB 预算、最多 8 请求）保持不变。同步删除只测这套预取的 `app_stream_warm_test.go`。
+
+   顺带确认了几个**不用再查**的点：两个项目的 `native/core` 里都没有任何 `time.Ticker` 后台轮询；全局外壳 `AppLayout` 没有 `BackdropFilter`，`liquid_glass` 在 Windows 已主动禁用玻璃；`media_library.dart` 两个项目完全一致。
+
+验证：`dart analyze lib test` 0 error / 0 warning。`test/player_interactions_test.dart` 扩到 7 例全绿——长按 3 倍速、左侧长按后上下滑调亮度并夹在 0.01~1.0、左侧**短滑**走切集不进亮度且不下发亮度、右侧上下滑切集、左右滑各 ±15 秒并给出 HUD 与提示、离开播放器复位亮度。播放相关 `player_screen_test` / `xigua_player_interactions_test` / `playback_loader_test` 全绿。Go 侧 `go build ./...`、`go vet ./core` 干净，`go test ./core -run 'Stream|Prefetch|Playback|AdBlock|Ad'` 通过。本机仍无 MSVC，Windows 包由 CI 构建，是否还顿需装包验收；按约定本轮为未验证开发快照。
 
 上一轮（1.4.7+100）继续追 **Windows 桌面端「播放几秒后开始卡顿」**：上一轮（1.4.4+97）清掉 d3d11vpp 与 verbose 日志后，用户实测仍比 guoappxxx 编译版卡。这一轮不再猜参数，而是把两个项目从依赖锁、Windows runner、播放器页面、弹幕层、Go 流代理逐层对齐，把差异逐条消掉。共三处，其中第一处正是上一轮自己引入的回归。
 
