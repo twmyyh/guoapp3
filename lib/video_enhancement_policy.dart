@@ -127,6 +127,14 @@ VideoEnhancementDecision chooseVideoEnhancement({
   required bool ready,
   required bool android,
   required bool television,
+
+  /// Windows 桌面端：只允许 mpv 内建的高质量缩放，不挂 GLSL 神经超分。
+  ///
+  /// 桌面端 media_kit 走 ANGLE（GLES over D3D11）回传纹理，神经超分着色器
+  /// 要在这个管线上额外跑一遍 CNN；一旦显卡余量不足，着色器生效的那一刻
+  /// （通常在开播几秒后）就开始持续掉帧，观感就是「播几秒后一顿一顿」。
+  /// 缩放档只调整 mpv 的 scale/cscale 参数，开销可以忽略。
+  bool windows = false,
   required bool gpu,
   required bool luma,
   required bool animation,
@@ -223,7 +231,11 @@ VideoEnhancementDecision chooseVideoEnhancement({
   if (pixels <= 0) return scaling;
   final limit = math.min(
     costLimit,
-    television || power.lowMemory || android ? 2 : 4,
+    windows
+        ? 1
+        : television || power.lowMemory || android
+        ? 2
+        : 4,
   );
   bool allowed(VideoEnhancementBackend backend) =>
       backend.cost <= limit && !rejected.contains(backend);

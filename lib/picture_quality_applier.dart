@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:media_kit/media_kit.dart';
 
@@ -77,18 +78,27 @@ class PictureQualityApplier {
       return;
     }
     if (_closed || _playerDisposed) return;
-    if (value == _applied && _effectsMounted(mpv, value)) return;
+    // Windows 桌面端把 Anime4K 归一化到「锐化」：桌面走 ANGLE
+    // （GLES over D3D11）回传纹理，再叠一层 CNN 超分着色器会持续掉帧，
+    // 典型表现就是开播几秒后画面一顿一顿。锐化是 mpv 内建滤镜，开销极低。
+    // 归一化必须在入口完成，否则 _applied 与 _effectsMounted 判定的档位
+    // 与实际挂载的效果不一致，会退化成每次 videoParams 变化都重建滤镜链。
+    final effective =
+        Platform.isWindows && value.mode == PictureQualityMode.anime4k
+        ? value.copyWith(mode: PictureQualityMode.sharpen)
+        : value;
+    if (effective == _applied && _effectsMounted(mpv, effective)) return;
     _clearOwnEffects();
     try {
-      switch (value.mode) {
+      switch (effective.mode) {
         case PictureQualityMode.original:
           break;
         case PictureQualityMode.sharpen:
-          _applySharpen(mpv, value.strength);
+          _applySharpen(mpv, effective.strength);
         case PictureQualityMode.anime4k:
           await _applyAnime4K(mpv);
       }
-      _applied = value;
+      _applied = effective;
     } catch (_) {
       // 增强不可用：清掉刚加的效果，退化为原画，不阻断播放。
       _clearOwnEffects();

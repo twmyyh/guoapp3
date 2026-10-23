@@ -40,10 +40,29 @@ type nativeStreamSession struct {
 	order       []string
 	warmMu      sync.Mutex
 	warming     map[string]bool
+	// warmSkip 记录「预取过一次但没戏」的分片（体积超限 / 上游拒绝 / 读取失败），
+	// 避免同一个分片被反复拉取又丢弃，把带宽白白耗在没结果的请求上。
+	warmSkip map[string]bool
+	// warmed 记录本会话已预热进内存的字节数，用来卡住累计预算。
+	warmed int64
 }
 
-// nativeWarmAheadLimit 是单个分片预取的上限，超出则不缓存（避免内存无谓增长）。
-const nativeWarmAheadLimit = 12 << 20
+// 播放中顺序预取（nativeWarmAhead）的边界。
+//
+// 预取只有在「上游单分片延迟高、同时带宽有余」时才是净收益。一旦上游限速
+// （短剧站很常见），后台预取会和播放器正在拉的那一片抢同一条连接预算，把
+// 当前分片拖慢，表现出来就是「播几秒就卡一下」。所以这里同时收紧三件事：
+//
+//   - 单片体积：超过 nativeWarmAheadSegmentLimit 的分片不预热。这类分片基本
+//     是高码率/4K 片源，完整读进内存只会抬高堆占用和带宽占用；
+//   - 会话预算：整个会话最多预热 nativeWarmAheadBudget 字节，用完即停。原先
+//     没有这个上限，等于把整集分片逐条搬进内存且永不淘汰，堆随播放时长线性
+//     增长，GC 越来越频繁，越播越卡；
+//   - 预取窗口：只提前一片，覆盖一次网络往返即可，不再连拉两片。
+const (
+	nativeWarmAheadSegmentLimit = 3 << 20
+	nativeWarmAheadBudget       = 24 << 20
+)
 
 type nativeStreamServer struct {
 	mu         sync.Mutex
@@ -80,7 +99,7 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia, adBlock bool) 
 	}
 	token := hex.EncodeToString(tokenBytes)
 	ctx, cancel := context.WithCancel(providerMediaContext(context.Background(), media.credentials))
-	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, warming: map[string]bool{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials, adBlock: adBlock}
+	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, warming: map[string]bool{}, warmSkip: map[string]bool{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials, adBlock: adBlock}
 	stream.mu.Lock()
 	for id, old := range stream.sessions {
 		if time.Since(old.lastUsed) > 10*time.Minute {
@@ -234,6 +253,12 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 // 上游延迟会在分片边界处表现为周期性的轻微卡顿；这里补充播放中的顺序预取。
 func (stream *nativeStreamServer) nativeWarmAhead(session *nativeStreamSession, token, currentID string) {
 	session.warmMu.Lock()
+	// 预算用完说明这一集已经预取够了，剩下的交给播放器按需拉取。
+	// 不加这道闸，整集分片会被逐条复制进内存且永不淘汰。
+	if session.warmed >= nativeWarmAheadBudget {
+		session.warmMu.Unlock()
+		return
+	}
 	index := -1
 	for i, id := range session.order {
 		if id == currentID {
@@ -246,9 +271,9 @@ func (stream *nativeStreamServer) nativeWarmAhead(session *nativeStreamSession, 
 		return
 	}
 	var targets []string
-	for i := index + 1; i < len(session.order) && len(targets) < 2; i++ {
+	for i := index + 1; i < len(session.order) && len(targets) < 1; i++ {
 		id := session.order[i]
-		if session.warming[id] {
+		if session.warming[id] || session.warmSkip[id] {
 			continue
 		}
 		session.mu.Lock()
@@ -268,9 +293,14 @@ func (stream *nativeStreamServer) nativeWarmAhead(session *nativeStreamSession, 
 
 // nativeWarmSegment 后台取回单个分片并写入会话，使播放器请求时可直接命中缓存。
 func (stream *nativeStreamServer) nativeWarmSegment(session *nativeStreamSession, id string) {
+	// skip 置真的分支表示「这一片不值得再试」，由 defer 记进 warmSkip。
+	skip := false
 	defer func() {
 		session.warmMu.Lock()
 		delete(session.warming, id)
+		if skip {
+			session.warmSkip[id] = true
+		}
 		session.warmMu.Unlock()
 	}()
 	session.mu.Lock()
@@ -285,21 +315,31 @@ func (stream *nativeStreamServer) nativeWarmSegment(session *nativeStreamSession
 	defer stop()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.address, nil)
 	if err != nil {
+		skip = true
 		return
 	}
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Referer", session.referer)
 	response, err := stream.downloader.doMediaRequest(request)
 	if err != nil {
+		skip = true
 		return
 	}
 	defer response.Body.Close()
 	// 只接受完整响应：部分响应会在播放时触发范围请求，交给主路径处理更稳妥。
 	if response.StatusCode != http.StatusOK {
+		skip = true
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, nativeWarmAheadLimit+1))
-	if err != nil || len(body) == 0 || int64(len(body)) > nativeWarmAheadLimit {
+	body, err := io.ReadAll(io.LimitReader(response.Body, nativeWarmAheadSegmentLimit+1))
+	if err != nil || len(body) == 0 {
+		skip = true
+		return
+	}
+	if int64(len(body)) > nativeWarmAheadSegmentLimit {
+		// 大分片（4K / 高码率）不预热：完整读进来只会抬高堆占用，而且会和
+		// 播放器正在拉的当前分片抢带宽。记下来不再重试。
+		skip = true
 		return
 	}
 	asset.data = body
@@ -311,6 +351,9 @@ func (stream *nativeStreamServer) nativeWarmSegment(session *nativeStreamSession
 	session.mu.Lock()
 	session.assets[id] = asset
 	session.mu.Unlock()
+	session.warmMu.Lock()
+	session.warmed += int64(len(body))
+	session.warmMu.Unlock()
 }
 
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {

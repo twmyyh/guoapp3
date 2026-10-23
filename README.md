@@ -2,9 +2,21 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.6+99（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.7+100（未验证开发快照）**。
 
-本轮（1.4.6+99）修一个用户实测报障：**导入 hanjuds（`www.hanjuds.com`）的 XBPQ 规则后，本地服务版一律提示「规则未抽取到列表条目」，但同一条规则在写源工具里是好的**。排查结论：规则本身没问题，是两层问题叠在一起——传输层选错了通道，上层又把真实错误吞了。
+本轮（1.4.7+100）继续追 **Windows 桌面端「播放几秒后开始卡顿」**：上一轮（1.4.4+97）清掉 d3d11vpp 与 verbose 日志后，用户实测仍比 guoappxxx 编译版卡。这一轮不再猜参数，而是把两个项目从依赖锁、Windows runner、播放器页面、弹幕层、Go 流代理逐层对齐，把差异逐条消掉。共三处，其中第一处正是上一轮自己引入的回归。
+
+1. **`framedrop=vo` 泄漏到了 Windows（上一轮的回归）**（`lib/windows_playback_tuning.dart`、`lib/xigua/xigua_player_screen.dart`）。`framedrop=vo` 的语义是「渲染稍跟不上就直接丢帧」，这是 Android TV 硬解带宽受限时才该用的策略——guoappxxx 也只把它写在 `Platform.isAndroid` 分支里，Windows 从不设（mpv 默认 `framedrop=no`，宁可平滑延迟也不跳帧）。上一轮把 `framedrop=vo` 和 `video-sync=audio` 提到了公共段，Windows 也跟着开了，于是渲染稍有压力就持续丢帧，观感就是「画面一顿一顿」。更隐蔽的是 xigua 播放器：它有一张不分平台的手机端参数表（预读压到 1 秒、`framedrop=vo`、`hr-seek-framedrop=yes`），Windows 分支虽然随后调了统一调优，但当时那套调优并不覆盖 `framedrop`，等于把丢帧留在了进程里（libmpv 是进程内单实例，属性带记忆，切播放器还会互相污染）。现在：Windows 统一调优显式写回 `framedrop=no`；xigua 的 `cache-secs`/`demuxer-readahead-secs`/`framedrop`/`hr-seek-framedrop` 四项限定在非 Windows 生效。
+
+2. **本机流代理的「播放中顺序预取」没有上限**（`native/core/app_stream.go`）。guoappxxx 的流代理只在开播时预热一次（`nativePrefetch`，4MB 预算、最多 8 个请求、只取前 8 秒）；本项目多出一套 `nativeWarmAhead`——播放器每请求一个分片，就再后台拉后两片并把**整片读进内存**，且没有总量上限、没有淘汰。HLS 一集通常几百个分片，于是：内存随播放时长线性增长，Go 堆越堆越大、GC 越来越频繁；同时后台预取与播放器正在拉的那一片抢同一条连接预算，站源一限速就把当前分片拖慢。两者都指向同一个观感——开头几秒正常，越播越卡。现在收紧三条边界：单分片超过 3MB 不预热（4K/高码率片源，读进来只是白占堆和带宽）、单会话累计预热封顶 24MB、预取窗口从两片降到一片；预取失败或超限的分片记进 `warmSkip`，不再反复重试同一个分片（否则超限分片会被一次次拉 3MB 再丢弃）。另外把 `cache-secs` 从 20 秒收回 10 秒，避免开播瞬间连发一串分片请求形成带宽洪峰。
+
+3. **Windows 上不再挂神经超分着色器**（`lib/video_enhancement_policy.dart`、`lib/video_enhancement.dart`、`lib/picture_quality_applier.dart`）。桌面端 media_kit 走 `vo=libmpv` + ANGLE（GLES over D3D11）回传纹理，RAVU / FSRCNNX / Anime4K 这些 CNN 着色器要在这条管线上再跑一遍；显卡余量不足时，着色器编译生效的那一刻（通常在开播几秒后）就开始持续掉帧。上一轮为了让增强「不再永远是原画」放宽了 GPU 判定，恰好让它更容易真正生效。现在给策略加 `windows` 维度：成本上限固定为 1，只允许 mpv 内建的「高质量缩放」（只改 scale/cscale，开销可忽略），神经超分档位不上；画质菜单里的 Anime4K 在 Windows 上归一化到内建锐化（归一化在入口完成，否则档位判定与实际挂载的效果不一致，会退化成每次 `videoParams` 变化都重建滤镜链）。
+
+排查过程中确认无需改动的项（避免下次重复排查）：`pubspec.lock` 里 media_kit / media_kit_video / media_kit_libs_windows_video 版本完全一致，两项目都用 Flutter 3.47.4；`windows/` runner 只有应用名与图标差异；`Video` 组件、`VideoControllerConfiguration`、`bufferSize=32MB`、`logLevel=error` 两边相同；播放器的 position/videoParams 订阅、`_saveTimer`(5s)/`_healthTimer`(1s)、弹幕渲染层、预加载触发条件逐行一致；`playback_recovery` 的卡住阈值相同（本项目重试次数更宽松）。
+
+验证：新增 `native/core/app_stream_warm_test.go` 3 例（超限分片只请求一次且标记跳过、预算耗尽后零请求、单次只预取一片且预算只累计真实缓存字节），`go test ./core -run "TestWarmAhead|TestAdFilter|TestNativeStream"` 全绿；`go build ./...`、`go vet ./core`、`gofmt` 干净。`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning（110 条为既有 info 级风格 lint），`dart format` 已跑。本机无 MSVC，Windows 包由 CI 构建，真机流畅度待装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.6+99）修一个用户实测报障：**导入 hanjuds（`www.hanjuds.com`）的 XBPQ 规则后，本地服务版一律提示「规则未抽取到列表条目」，但同一条规则在写源工具里是好的**。排查结论：规则本身没问题，是两层问题叠在一起——传输层选错了通道，上层又把真实错误吞了。
 
 1. **自定义源 host 的传输通道选错（根因）**（`native/core/network_browser.go`）。`registerCustomBrowserHost` 会把每个自定义源 host 登记进「浏览器指纹传输」白名单，命中后请求改走 tls-client 的 Chrome 150 指纹（utls）。实测该站对这套指纹直接返回 `403` + `cf-mitigated: challenge`，而标准 Go 传输（带规则里的 `请求头`）稳定 200；用 tls-client 试 Chrome 120/133/150 四种指纹全部被挡，确认不是 UA 或版本号问题。现在把运行期登记的自定义源 host 与内置 Browser 源区分开：**先走标准传输**（吃规则里的 UA，绝大多数站点本就够用），只有真的拿到验证页（403/429/503 且带 `cf-mitigated: challenge`，或 403）才升级到指纹传输，并在进程内记住该 host 后续直连指纹通道——CF 前缀加速源照旧能用，普通 CMS 站不再被误伤。内置 Browser 源（`huangguo.video` 等静态白名单）行为不变。切换通道时写一条 `network.browser_request` 诊断，便于定位站点拦截。
 

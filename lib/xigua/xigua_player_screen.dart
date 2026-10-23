@@ -1294,10 +1294,13 @@ class _PlayerScreenState extends State<XiguaPlayerScreen>
         if (platform is NativePlayer) {
           for (final option in {
             'cache-on-disk': 'no',
-            'cache-secs': '20',
-            'demuxer-readahead-secs': '1',
-            'framedrop': 'vo',
-            'hr-seek-framedrop': 'yes',
+            // 下面四项是手机端「抢首帧」策略：预读压到 1 秒、渲染跟不上就丢帧。
+            // Windows 桌面必须排除——丢帧正是「播放几秒后画面一顿一顿」的来源，
+            // 桌面端改由 WindowsPlaybackTuning 统一收敛。
+            if (!Platform.isWindows) 'cache-secs': '20',
+            if (!Platform.isWindows) 'demuxer-readahead-secs': '1',
+            if (!Platform.isWindows) 'framedrop': 'vo',
+            if (!Platform.isWindows) 'hr-seek-framedrop': 'yes',
             'hwdec-codecs': 'h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1,avs3',
             if (Platform.isAndroid) 'ao': 'audiotrack,opensles',
           }.entries) {
