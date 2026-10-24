@@ -331,11 +331,15 @@ void main() {
     expect(interactions.feedback, contains('快进'));
     // 抬手完成 seek 后，预览 HUD 应立即消失，不残留在屏幕上。
     expect(interactions.hudState.type, SwipeAction.none);
+    // 抬手的确认提示是沉浸式的：不能唤出控制条重新计时，
+    // 否则中上部的确认黑框要等 4 秒自动隐藏才消失。
+    expect(interactions.feedbackRevealsControls, isFalse);
 
     await swipe(const Offset(400, 200), const Offset(240, 200));
     expect(player.state.position, Duration.zero);
     expect(interactions.feedback, contains('后退'));
     expect(interactions.hudState.type, SwipeAction.none);
+    expect(interactions.feedbackRevealsControls, isFalse);
 
     interactions.dispose();
     await player.dispose();

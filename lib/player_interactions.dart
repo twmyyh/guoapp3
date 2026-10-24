@@ -338,8 +338,9 @@ class PlayerInteractions extends ChangeNotifier {
         horizontal &&
         _axis == _SwipeAxis.horizontal) {
       // 左右滑动：一次固定步长快进/快退。预览 HUD 只在该手势期间有效，
-      // 抬手完成 seek 后立刻隐藏，不留残影；确认提示交给 hint 的自动淡出。
-      seek(delta.dx > 0 ? seekStep : -seekStep);
+      // 抬手完成 seek 后立刻隐藏，不留残影；确认提示只在中上部留一行并
+      // 自动淡出（immersive 不唤出控制条），避免那个黑框滞留几秒才消失。
+      seek(delta.dx > 0 ? seekStep : -seekStep, immersive: true);
       _dismissHud();
     } else if (_swipeEnabled &&
         _moved &&
@@ -403,13 +404,18 @@ class PlayerInteractions extends ChangeNotifier {
     }
   }
 
-  void seek(int seconds) {
+  void seek(int seconds, {bool immersive = false}) {
     if (!available() || player.state.duration <= Duration.zero) return;
     _endHold();
     final target = (player.state.position.inMilliseconds + seconds * 1000)
         .clamp(0, player.state.duration.inMilliseconds);
     unawaited((onSeek ?? player.seek)(Duration(milliseconds: target)));
-    hint('${seconds > 0 ? '快进至' : '后退至'} ${formatPosition(target / 1000)}');
+    hint(
+      '${seconds > 0 ? '快进至' : '后退至'} ${formatPosition(target / 1000)}',
+      // 左右滑动这类沉浸式手势的确认提示只在中上部留一行字并自动淡出，
+      // 不能把控制条唤出来重新计时，否则那个确认框会滞留几秒才消失。
+      revealControls: !immersive,
+    );
   }
 
   void changeVolume(double delta) {
