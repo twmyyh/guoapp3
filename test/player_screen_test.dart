@@ -373,6 +373,12 @@ void main() {
         await tester.pump();
         expect(player.state.position, before - const Duration(seconds: 5));
         expect(find.textContaining('后退至'), findsOneWidget);
+        // 中上部确认黑框（深灰底）里的文字必须是显式白色，
+        // 不能继承主题默认深色字，否则亮主题下整块像个「看不见的黑框」。
+        final hintStyle = tester.widget<Text>(
+          find.textContaining('后退至'),
+        ).style!;
+        expect(hintStyle.color, Colors.white);
 
         await mouse.removePointer();
         await unmount(tester, player);
