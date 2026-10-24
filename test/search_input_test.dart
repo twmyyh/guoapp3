@@ -85,4 +85,77 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
   });
+
+  testWidgets(
+    'pinyin initials query matches the local library offline without the remote api',
+    (tester) async {
+      final controller = TextEditingController();
+      final searches = <String>[];
+      final remoteCalls = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SearchInput(
+              controller: controller,
+              hint: '搜索',
+              onSearch: searches.add,
+              suggestions: (query) async {
+                remoteCalls.add(query);
+                return [];
+              },
+              localTitles: ['复仇者联盟', '斗罗大陆', '藏海花'],
+            ),
+          ),
+        ),
+      );
+      // 纯字母输入 fczlm：命中本地片库「复仇者联盟」，且不该触发远端。
+      await tester.enterText(find.byType(TextField), 'fczlm');
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(remoteCalls, isEmpty, reason: '纯字母首字母查询应离线走本地片库');
+      final item = find.byKey(const ValueKey('search-suggestion-0'));
+      expect(
+        tester
+            .widget<Text>(
+              find.descendant(of: item, matching: find.byType(Text)).first,
+            )
+            .textSpan!
+            .toPlainText(),
+        '复仇者联盟',
+      );
+      await tester.tap(item);
+      await tester.pumpAndSettle();
+      expect(searches, ['复仇者联盟']);
+      expect(controller.text, '复仇者联盟');
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+    },
+  );
+
+  testWidgets(
+    'pinyin initials query with no local hit stays empty when there is no remote either',
+    (tester) async {
+      final controller = TextEditingController();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SearchInput(
+              controller: controller,
+              hint: '搜索',
+              onSearch: (_) {},
+              // 没有远端联想，纯字母本地又没命中 → 不弹任何候选。
+              localTitles: ['复仇者联盟'],
+            ),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), 'zzz');
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('search-suggestion-0')), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+    },
+  );
 }

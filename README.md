@@ -2,7 +2,17 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.4+105（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.7+108（未验证开发快照）**。
+
+本轮（1.5.7+108）两件事。
+
+1. **搜索框支持拼音首字母提示**（`lib/pinyin_search.dart`、`search_input.dart`、`home_screen.dart`、`remote_widgets.dart`，新增 `pinyin` 依赖 3.3.0）。引入纯 Dart 的 `pinyin` 包做汉字→声母转换，把用户「打 fczlm 就提示复仇者联盟」落到本地片库：`SearchInput` 新增 `localTitles` 参数（传入收藏 + 最近观看的剧名），输入**纯字母**时先做离线拼音首字母匹配（`matchPinyinInitials`），命中直接弹候选、隐私不出端；本地没命中且没有远端联想时为空，否则回落到原有远端子串联想（远端按中文匹配，纯字母多半无果，仅兜底）。含中文的输入维持走远端，不受影响。`TelevisionSearchDialog` 透传 `localTitles`，TV 搜索弹窗同样可用。
+
+2. **修复「从播放器返回偶发直接退软件」**（`lib/player_screen.dart`）。桌面/TV 点关闭或按 Esc/返回时，`_back()` 此前是裸 `maybePop()`：一旦栈里只剩播放页（全屏时 canPop=false 也可能落空）就会被系统当作「无下方页面」直接退 app，表现为有时回到列表、有时直接关软件。恢复 40b350e 曾加、但 8098413 移植 guoappxxx 播放器时被冲掉的守卫——`isFirst` 判定：播放页是首路由才交还系统，否则强制 `pop()` 回列表。
+
+本轮（1.5.6+107）修 TV 模式电影列表遥控器上移不跟随的问题：`RemoteGrid`（`lib/remote_widgets.dart`）的 `_focusAt` 旧逻辑是「目标瓦片已构建（`node.context != null`）就只 `requestFocus`、不滚动」。而 `SliverGrid` + `SliverChildBuilderDelegate` 会保留已布局瓦片，于是向下走时新瓦片未构建、走滚动分支（正常），向上回选时目标瓦片被 keep-alive 保留、`context` 一直非空、命中早退分支 → 不滚动 → 选中行停在视口外，表现为「下能到、上回不到」。修法：只要目标行滚出视口（`top < pixels` 或 `bottom > pixels+viewport`）就先 `jumpTo` 回视野再取焦点，同列左右移动不动画面避免抖动。`test/television_test.dart` 新增「下移 10 行再上移 6 行，滚动必须回退」回归用例（旧逻辑下该用例红，修复后绿），与既有电视端用例对照确认未引入新失败。
+
+本轮（1.5.5+106）修左右滑动快进/快退后「中上部黑框」里的提示文字看不见的问题。`_gestureFeedback` 里那块深灰确认框（`Colors.black87` 底，放「快进至/后退至 xx」）没给文字显式颜色，于是继承主题默认字色——亮主题下是深色，深灰底上深色字，整块看起来就是一个空黑框。参照版 guoappxxx 同一处也是这个写法（同样的坑）。已给该确认框文字设 `color: Colors.white`，与上方快进/后退、亮度三个 HUD 框的白色字重对齐；黑底是主题无关的，所以文字恒定白色、不随主题变深。`test/player_screen_test.dart` 的方向键回退用例补上「确认框文字色为 `Colors.white`」的断言。xigua 播放控件那块本就已显式白色，无需改。
 
 本轮（1.5.4+105）再修一个左右滑动快进/快退的残留：1.5.3 只收了画面**正中央**的快进/后退预览（`Center`），但抬手完成 `seek` 后还会调 `hint('快进至/后退至 …')`，这个确认提示默认 `revealControls: true`，会把整条控制条重新唤出并重置 **4 秒**自动隐藏定时器——于是中上部那个确认黑框（`_gestureFeedback` 里 `Alignment(0,-.5)` 那块）要等几秒才消失，观感上还是「残留」。修法是给 `seek()` 加 `immersive` 标志：左右滑动这条手势路径传 `immersive: true`，确认提示只在中上部留一行并走 `hint` 自带的 1.2 秒自动淡出，不再唤出控制条重新计时；键盘长按/方向键的 `seek` 仍保持唤出控制条（桌面键盘习惯）。`test/player_interactions_test.dart` 的左右滑用例补上抬手后 `feedbackRevealsControls == false` 的断言。
 

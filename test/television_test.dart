@@ -198,6 +198,55 @@ void main() {
     },
   );
 
+  testWidgets(
+    'remote grid scrolls back up when focus returns to retained rows',
+    (tester) async {
+      size(tester, const Size(960, 540));
+      final scroll = ScrollController();
+      addTearDown(scroll.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: RemoteGrid(
+              itemKeys: List.generate(59, (index) => '$index'),
+              columns: 4,
+              itemExtent: 100,
+              autofocus: true,
+              controller: scroll,
+              itemBuilder: (_, index, node, onFocus) => RemoteEpisodeButton(
+                number: index,
+                focusNode: node,
+                onFocus: onFocus,
+                onPressed: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(FocusManager.instance.primaryFocus?.debugLabel, 'remote-0');
+
+      // 下移 10 行（index 0 -> 40，row 10）：目标行超出视口，滚动应跟随到下方。
+      for (var row = 0; row < 10; row++) {
+        await press(tester, LogicalKeyboardKey.arrowDown);
+      }
+      expect(FocusManager.instance.primaryFocus?.debugLabel, 'remote-40');
+      final offsetAfterDown = scroll.offset;
+      expect(offsetAfterDown, greaterThan(0));
+
+      // 上移 6 行（index 40 -> 16，row 4）：这些上方瓦片在往下走时已被
+      // keep-alive 保留（context 非空），旧逻辑「context 非空就只 requestFocus
+      // 不滚动」会让选中行留在视口外，表现为「下移能到、上移选不回来」。
+      // 现在只要目标行滚出视口就先跳回，再取焦点。
+      for (var row = 0; row < 6; row++) {
+        await press(tester, LogicalKeyboardKey.arrowUp);
+      }
+      expect(FocusManager.instance.primaryFocus?.debugLabel, 'remote-16');
+      expect(scroll.offset, lessThan(offsetAfterDown));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('episode grid initially focuses an offscreen saved episode', (
     tester,
   ) async {

@@ -321,19 +321,26 @@ class RemoteGridState extends State<RemoteGrid> {
     final generation = ++_generation;
     _target = widget.itemKeys[index];
     final node = _node(index);
+    // 先把目标行滚动进视野。这里不能只在「瓦片未构建」时才滚动：
+    // SliverGrid 会保留已布局的瓦片（context 一直非空），向上回选时目标
+    // 瓦片多半仍在树里但已滚出视口，若沿用「context 非空就只 requestFocus
+    // 不滚动」的旧路径，就会出现「向下能到、向上选不回来」的不对称。
+    // 只在目标行确实超出视口才滚动，同列左右移动不动画面、避免抖动。
+    if (_scroll.hasClients) {
+      final pos = _scroll.position;
+      final top =
+          widget.padding.top +
+          (index ~/ widget.columns) * (widget.itemExtent + widget.spacing);
+      final bottom = top + widget.itemExtent;
+      if (top < pos.pixels || bottom > pos.pixels + pos.viewportDimension) {
+        final offset = top < pos.pixels ? top : bottom - pos.viewportDimension;
+        pos.jumpTo(offset.clamp(0.0, pos.maxScrollExtent));
+      }
+    }
     if (node.context != null) {
       node.requestFocus();
       _target = null;
       return;
-    }
-    if (_scroll.hasClients) {
-      final top =
-          widget.padding.top +
-          (index ~/ widget.columns) * (widget.itemExtent + widget.spacing);
-      final offset = top < _scroll.offset
-          ? top
-          : top + widget.itemExtent - _scroll.position.viewportDimension;
-      _scroll.jumpTo(offset.clamp(0.0, _scroll.position.maxScrollExtent));
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && generation == _generation && node.context != null) {
@@ -1031,6 +1038,7 @@ class TelevisionSearchDialog extends StatefulWidget {
     required this.initialValue,
     required this.title,
     this.suggestions,
+    this.localTitles,
     this.recentSearches = const [],
     this.onCancel,
     this.crossSource = false,
@@ -1038,6 +1046,7 @@ class TelevisionSearchDialog extends StatefulWidget {
     this.crossSourceCount = 0,
   });
   final Future<List<String>> Function(String)? suggestions;
+  final List<String>? localTitles;
   final List<String> recentSearches;
   final VoidCallback? onCancel;
   final String initialValue;
@@ -1076,6 +1085,7 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
                 controller: _controller,
                 hint: '输入剧名',
                 suggestions: widget.suggestions,
+                localTitles: widget.localTitles,
                 onCancel: widget.onCancel,
                 onSearch: (value) => Navigator.pop(context, value),
                 crossSource: widget.crossSource,

@@ -28,6 +28,8 @@ class PlayerControls extends StatefulWidget {
     required this.speed,
     required this.qualityLabel,
     required this.onFocusSurface,
+    this.routeLabel,
+    this.onRoute,
     this.showDanmaku = false,
     this.danmakuEnabled = false,
     this.danmakuStatus = '',
@@ -58,6 +60,8 @@ class PlayerControls extends StatefulWidget {
   final double speed;
   final String qualityLabel;
   final VoidCallback onFocusSurface;
+  final String? routeLabel;
+  final Future<void> Function()? onRoute;
   final bool showDanmaku;
   final bool danmakuEnabled;
   final String danmakuStatus;
@@ -776,6 +780,14 @@ class _PlayerControlsState extends State<PlayerControls> {
           onPressed: widget.enabled ? () => _panel(widget.onQuality) : null,
           width: 52,
         ),
+        if (widget.routeLabel != null && widget.onRoute != null)
+          _toolText(
+            key: const ValueKey('player-route'),
+            tooltip: '切换播放线路',
+            label: widget.routeLabel!,
+            onPressed: widget.enabled ? () => _panel(widget.onRoute!) : null,
+            width: 52,
+          ),
       ],
       if (showPush) _lanPushTool(const ValueKey('fullscreen-lan-push')),
       if (showEpisodes)
@@ -837,6 +849,14 @@ class _PlayerControlsState extends State<PlayerControls> {
         onPressed: widget.enabled ? () => _panel(widget.onQuality) : null,
         width: 52,
       ),
+      if (widget.routeLabel != null && widget.onRoute != null)
+        _toolText(
+          key: const ValueKey('player-route'),
+          tooltip: '切换播放线路',
+          label: widget.routeLabel!,
+          onPressed: widget.enabled ? () => _panel(widget.onRoute!) : null,
+          width: 52,
+        ),
       if (widget.onPush != null)
         _lanPushTool(const ValueKey('fullscreen-lan-push')),
       if (fullscreen)
@@ -1129,7 +1149,14 @@ class _PlayerControlsState extends State<PlayerControls> {
             child: Text(
               feedback,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              // 黑底是主题无关的（一直深灰），文字必须恒定白色，
+              // 否则亮主题下继承默认深色字，整块就变成一个「看不见的黑框」。
+              // 与上方快进/后退、亮度三个 HUD 框的白色字重对齐。
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ),
