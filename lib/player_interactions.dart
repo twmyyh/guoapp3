@@ -231,6 +231,10 @@ class PlayerInteractions extends ChangeNotifier {
     if (_brightnessActive) {
       _brightnessActive = false;
       _scheduleDismissHud();
+    } else if (_hudState.type == SwipeAction.seek) {
+      // 手势被系统打断（多指、来电等）时，快进/快退预览同样要立刻收起，
+      // 否则残影会一直挂在画面中央。
+      _dismissHud();
     }
     _endHold(silent: true);
     hint('', revealControls: false);
@@ -347,6 +351,13 @@ class PlayerInteractions extends ChangeNotifier {
       if (available()) {
         hint(onEpisode(delta.dy < 0 ? 1 : -1), revealControls: false);
       }
+    }
+
+    // 兜底：滑动途中已弹出快进/快退预览，但本次抬手既未达水平判定
+    // 也未达垂直判定（典型是斜滑），上面几个分支都不会收起预览，
+    // 这里统一立即隐藏，避免 HUD 残留在屏幕上。
+    if (_hudState.type == SwipeAction.seek) {
+      _dismissHud();
     }
 
     if (_moved || _held) {

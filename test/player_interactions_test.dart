@@ -341,6 +341,56 @@ void main() {
     await player.dispose();
   });
 
+  test('斜滑弹出快进预览但抬手不达水平/垂直判定时也要收起 HUD', () async {
+    final platform = ScriptedPlayer();
+    final player = Player(platformPlayer: platform);
+    await platform.open(Media('https://media.test/working.mp4'));
+    final interactions = build(player);
+
+    // width=800 → 水平阈值 96；height=400 → 垂直阈值 32。
+    // 滑动 dx=+100（>=96，途中弹出快进预览）但 dy=80 使 dx>dy*1.5 不成立，
+    // 抬手时既不触发水平快进也不触发垂直切集 —— 只有兜底会收起预览。
+    interactions.pointerDown(
+      PointerDownEvent(
+        pointer: 1,
+        position: const Offset(400, 200),
+        buttons: kPrimaryButton,
+        kind: PointerDeviceKind.touch,
+        timeStamp: Duration.zero,
+      ),
+      swipeEnabled: true,
+      height: 400,
+      width: 800,
+    );
+    interactions.pointerMove(
+      PointerMoveEvent(
+        pointer: 1,
+        position: const Offset(500, 120),
+        buttons: kPrimaryButton,
+        kind: PointerDeviceKind.touch,
+        timeStamp: const Duration(milliseconds: 120),
+      ),
+    );
+    // 途中已弹出快进预览。
+    expect(interactions.hudState.type, SwipeAction.seek);
+
+    interactions.pointerUp(
+      PointerUpEvent(
+        pointer: 1,
+        position: const Offset(500, 120),
+        buttons: 0,
+        kind: PointerDeviceKind.touch,
+        timeStamp: const Duration(milliseconds: 160),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    // 抬手后预览必须被兜底收起，不能残留在屏幕上。
+    expect(interactions.hudState.type, SwipeAction.none);
+
+    interactions.dispose();
+    await player.dispose();
+  });
+
   test('快进与音量提示走反馈文案', () async {
     final platform = ScriptedPlayer();
     final player = Player(platformPlayer: platform);
