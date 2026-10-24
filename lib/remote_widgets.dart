@@ -1038,6 +1038,7 @@ class TelevisionSearchDialog extends StatefulWidget {
     required this.initialValue,
     required this.title,
     this.suggestions,
+    this.localTitles,
     this.recentSearches = const [],
     this.onCancel,
     this.crossSource = false,
@@ -1045,6 +1046,7 @@ class TelevisionSearchDialog extends StatefulWidget {
     this.crossSourceCount = 0,
   });
   final Future<List<String>> Function(String)? suggestions;
+  final List<String>? localTitles;
   final List<String> recentSearches;
   final VoidCallback? onCancel;
   final String initialValue;
@@ -1083,6 +1085,7 @@ class _TelevisionSearchDialogState extends State<TelevisionSearchDialog> {
                 controller: _controller,
                 hint: '输入剧名',
                 suggestions: widget.suggestions,
+                localTitles: widget.localTitles,
                 onCancel: widget.onCancel,
                 onSearch: (value) => Navigator.pop(context, value),
                 crossSource: widget.crossSource,

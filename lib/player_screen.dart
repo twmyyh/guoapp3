@@ -1593,7 +1593,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_showFullscreen && !_television) {
       _rotate();
     } else {
-      Navigator.of(context).maybePop();
+      // 遥控 / 物理「返回」/ 桌面「关闭」/ Esc：只要下方还有路由（如影片列表页）
+      // 就强制 pop 回去。播放器全屏时 canPop=false，裸 maybePop 会落空，被系统
+      // 当作「无下方页面」直接退 app——这正是 40b350e 修过、但 8098413 移植
+      // guoappxxx 播放器时被冲掉的那段。用 isFirst 判定 + 无条件 pop，确保只要
+      // 列表页在栈底就一定回到列表，只有播放页本身是首路由时才交还系统退出。
+      final navigator = Navigator.of(context);
+      if (ModalRoute.of(context)?.isFirst ?? false) {
+        navigator.maybePop();
+      } else {
+        navigator.pop();
+      }
     }
   }
 

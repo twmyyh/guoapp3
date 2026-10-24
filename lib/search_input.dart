@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'pinyin_search.dart';
+
 class SearchInput extends StatefulWidget {
   const SearchInput({
     super.key,
@@ -12,6 +14,7 @@ class SearchInput extends StatefulWidget {
     required this.onSearch,
     this.onChanged,
     this.suggestions,
+    this.localTitles,
     this.onCancel,
     this.autofocus = false,
     this.crossSource = false,
@@ -23,6 +26,9 @@ class SearchInput extends StatefulWidget {
   final ValueChanged<String> onSearch;
   final ValueChanged<String>? onChanged;
   final Future<List<String>> Function(String)? suggestions;
+  // 本地片库里的剧名（收藏 / 最近观看 / 下载）。输入纯字母时按拼音首字母
+  // 在本地即时匹配（如 fczlm → 复仇者联盟），离线、隐私不出端；没命中再走远端。
+  final List<String>? localTitles;
   final VoidCallback? onCancel;
   final bool autofocus;
   // crossSource 勾选后并发搜索所有可见站源，否则只搜索当前站源。
@@ -139,13 +145,18 @@ class _SearchInputState extends State<SearchInput> {
     super.dispose();
   }
 
+  // 纯字母输入（拼音首字母）：优先在本地片库即时匹配，离线、不出端。
+  // 命中直接返回；没命中才退回远端（远端按中文子串匹配，纯字母多半无果，仅兜底）。
+  List<String> _localOptions(String query) {
+    final titles = widget.localTitles;
+    if (titles == null || titles.isEmpty) return const [];
+    return matchPinyinInitials(query, titles, limit: 10);
+  }
+
   Future<Iterable<String>> _options(TextEditingValue value) async {
     _abort();
     final query = value.text.trim();
-    if (query.isEmpty ||
-        query.length > 100 ||
-        widget.suggestions == null ||
-        !value.composing.isCollapsed) {
+    if (query.isEmpty || query.length > 100 || !value.composing.isCollapsed) {
       _syncOptions(const []);
       return const [];
     }
@@ -153,6 +164,23 @@ class _SearchInputState extends State<SearchInput> {
     if (cached != null) {
       _syncOptions(cached);
       return cached;
+    }
+    // 首字母提示：输入 fczlm 先在本地的收藏 / 看过的片库里找「复仇者联盟」。
+    if (isPinyinInitialsQuery(query)) {
+      final local = _localOptions(query);
+      if (local.isNotEmpty) {
+        _remember(query, local);
+        _syncOptions(local);
+        return local;
+      }
+      if (widget.suggestions == null) {
+        _syncOptions(const []);
+        return const [];
+      }
+    }
+    if (widget.suggestions == null) {
+      _syncOptions(const []);
+      return const [];
     }
     final generation = _generation;
     final pending = Completer<Iterable<String>>();
@@ -164,8 +192,7 @@ class _SearchInputState extends State<SearchInput> {
           query,
         )).where((s) => s.trim().isNotEmpty).toSet().take(10).toList();
         if (generation == _generation && mounted) {
-          if (_cache.length >= 32) _cache.remove(_cache.keys.first);
-          _cache[query] = fetched;
+          _remember(query, fetched);
           result = fetched;
         }
       } catch (_) {}
@@ -173,6 +200,11 @@ class _SearchInputState extends State<SearchInput> {
       if (generation == _generation && mounted) _syncOptions(result);
     });
     return pending.future;
+  }
+
+  void _remember(String query, List<String> items) {
+    if (_cache.length >= 32) _cache.remove(_cache.keys.first);
+    _cache[query] = items;
   }
 
   void _submit(String value) {

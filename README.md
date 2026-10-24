@@ -2,7 +2,13 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.6+107（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.7+108（未验证开发快照）**。
+
+本轮（1.5.7+108）两件事。
+
+1. **搜索框支持拼音首字母提示**（`lib/pinyin_search.dart`、`search_input.dart`、`home_screen.dart`、`remote_widgets.dart`，新增 `pinyin` 依赖 3.3.0）。引入纯 Dart 的 `pinyin` 包做汉字→声母转换，把用户「打 fczlm 就提示复仇者联盟」落到本地片库：`SearchInput` 新增 `localTitles` 参数（传入收藏 + 最近观看的剧名），输入**纯字母**时先做离线拼音首字母匹配（`matchPinyinInitials`），命中直接弹候选、隐私不出端；本地没命中且没有远端联想时为空，否则回落到原有远端子串联想（远端按中文匹配，纯字母多半无果，仅兜底）。含中文的输入维持走远端，不受影响。`TelevisionSearchDialog` 透传 `localTitles`，TV 搜索弹窗同样可用。
+
+2. **修复「从播放器返回偶发直接退软件」**（`lib/player_screen.dart`）。桌面/TV 点关闭或按 Esc/返回时，`_back()` 此前是裸 `maybePop()`：一旦栈里只剩播放页（全屏时 canPop=false 也可能落空）就会被系统当作「无下方页面」直接退 app，表现为有时回到列表、有时直接关软件。恢复 40b350e 曾加、但 8098413 移植 guoappxxx 播放器时被冲掉的守卫——`isFirst` 判定：播放页是首路由才交还系统，否则强制 `pop()` 回列表。
 
 本轮（1.5.6+107）修 TV 模式电影列表遥控器上移不跟随的问题：`RemoteGrid`（`lib/remote_widgets.dart`）的 `_focusAt` 旧逻辑是「目标瓦片已构建（`node.context != null`）就只 `requestFocus`、不滚动」。而 `SliverGrid` + `SliverChildBuilderDelegate` 会保留已布局瓦片，于是向下走时新瓦片未构建、走滚动分支（正常），向上回选时目标瓦片被 keep-alive 保留、`context` 一直非空、命中早退分支 → 不滚动 → 选中行停在视口外，表现为「下能到、上回不到」。修法：只要目标行滚出视口（`top < pixels` 或 `bottom > pixels+viewport`）就先 `jumpTo` 回视野再取焦点，同列左右移动不动画面避免抖动。`test/television_test.dart` 新增「下移 10 行再上移 6 行，滚动必须回退」回归用例（旧逻辑下该用例红，修复后绿），与既有电视端用例对照确认未引入新失败。
 

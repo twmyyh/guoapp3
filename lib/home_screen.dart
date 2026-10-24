@@ -113,6 +113,23 @@ class _HomeScreenState extends State<HomeScreen> {
   List<String> get _visibleSourceIds => [
     for (final source in widget.store.visibleSources) source.id,
   ];
+
+  // 本地片库的剧名（最近看过的 + 追剧/收藏），供首字母联想做拼音匹配。
+  // 离线、不出端；输入 fczlm 会在这些剧名里命中「复仇者联盟」。
+  List<String> get _localTitles {
+    final seen = <String>{};
+    final titles = <String>[];
+    for (final entry in widget.store.history) {
+      final title = entry.drama.title.trim();
+      if (title.isNotEmpty && seen.add(title)) titles.add(title);
+    }
+    for (final drama in widget.store.favorites) {
+      final title = drama.title.trim();
+      if (title.isNotEmpty && seen.add(title)) titles.add(title);
+    }
+    return titles;
+  }
+
   // 勾选跨源后，即便当前分组本身不支持在线搜索，也按全部可见源发起在线搜索。
   // 自定义源在 Dart 侧 onlineSearch 恒为 false，但 Go 侧 searchAcross 能识别
   // custom:* 源并并发搜索，不支持搜索的源会被静默跳过；是否真有结果由 Go 判定，
@@ -424,6 +441,7 @@ class _HomeScreenState extends State<HomeScreen> {
         recentSearches: widget.store.recentSearches,
         onCancel: () => unawaited(widget.repository.cancelSuggestions()),
         suggestions: _searchSuggestions ? widget.repository.suggestions : null,
+        localTitles: _localTitles,
         crossSource: _crossSourceSearch,
         onCrossSourceChanged: _crossSourceSearch || _visibleSourceIds.isNotEmpty
             ? _changeCrossSource
@@ -1512,6 +1530,7 @@ class _HomeScreenState extends State<HomeScreen> {
               suggestions: _searchSuggestions
                   ? widget.repository.suggestions
                   : null,
+              localTitles: _localTitles,
               onChanged: _searchChanged,
               onCancel: () => unawaited(widget.repository.cancelSuggestions()),
               onSearch: _submitSearch,
