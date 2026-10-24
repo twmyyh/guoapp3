@@ -37,13 +37,7 @@ type nativeStreamSession struct {
 	cancel      context.CancelFunc
 	lastUsed    time.Time
 	adBlock     bool
-	order       []string
-	warmMu      sync.Mutex
-	warming     map[string]bool
 }
-
-// nativeWarmAheadLimit 是单个分片预取的上限，超出则不缓存（避免内存无谓增长）。
-const nativeWarmAheadLimit = 12 << 20
 
 type nativeStreamServer struct {
 	mu         sync.Mutex
@@ -80,7 +74,7 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia, adBlock bool) 
 	}
 	token := hex.EncodeToString(tokenBytes)
 	ctx, cancel := context.WithCancel(providerMediaContext(context.Background(), media.credentials))
-	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, warming: map[string]bool{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials, adBlock: adBlock}
+	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials, adBlock: adBlock}
 	stream.mu.Lock()
 	for id, old := range stream.sessions {
 		if time.Since(old.lastUsed) > 10*time.Minute {
@@ -148,7 +142,6 @@ func (stream *nativeStreamServer) nativeAsset(token string, session *nativeStrea
 
 func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStreamSession, body, base string) (string, error) {
 	var output []string
-	var order []string
 	nextPlaylist := false
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		text := strings.TrimSpace(line)
@@ -185,12 +178,6 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 			if line == "" {
 				return "", errors.New("播放列表中的媒体地址无效")
 			}
-			// 记录媒体分片的先后顺序，供播放中按序预取后续分片。
-			if contentType == "" {
-				if id := strings.TrimPrefix(line, stream.address+"/"+token+"/"); id != line && id != "" {
-					order = append(order, id)
-				}
-			}
 		} else if strings.Contains(text, "URI=") {
 			invalid := false
 			line = nativePlaylistURI.ReplaceAllStringFunc(line, func(match string) string {
@@ -220,97 +207,7 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 		}
 		output = append(output, line)
 	}
-	if len(order) > 0 {
-		session.mu.Lock()
-		session.order = order
-		session.mu.Unlock()
-	}
 	return strings.Join(output, "\n"), nil
-}
-
-// nativeWarmAhead 在播放到某个分片时预取其后的若干分片。
-//
-// nativePrefetch 只在开播时预热一次，预热缓冲放完后每个分片都要现取，
-// 上游延迟会在分片边界处表现为周期性的轻微卡顿；这里补充播放中的顺序预取。
-func (stream *nativeStreamServer) nativeWarmAhead(session *nativeStreamSession, token, currentID string) {
-	session.warmMu.Lock()
-	index := -1
-	for i, id := range session.order {
-		if id == currentID {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		session.warmMu.Unlock()
-		return
-	}
-	var targets []string
-	for i := index + 1; i < len(session.order) && len(targets) < 2; i++ {
-		id := session.order[i]
-		if session.warming[id] {
-			continue
-		}
-		session.mu.Lock()
-		asset, ok := session.assets[id]
-		session.mu.Unlock()
-		if ok && len(asset.data) > 0 {
-			continue
-		}
-		session.warming[id] = true
-		targets = append(targets, id)
-	}
-	session.warmMu.Unlock()
-	for _, id := range targets {
-		go stream.nativeWarmSegment(session, id)
-	}
-}
-
-// nativeWarmSegment 后台取回单个分片并写入会话，使播放器请求时可直接命中缓存。
-func (stream *nativeStreamServer) nativeWarmSegment(session *nativeStreamSession, id string) {
-	defer func() {
-		session.warmMu.Lock()
-		delete(session.warming, id)
-		session.warmMu.Unlock()
-	}()
-	session.mu.Lock()
-	asset, ok := session.assets[id]
-	session.mu.Unlock()
-	if !ok || len(asset.data) > 0 || strings.Contains(asset.contentType, "mpegurl") {
-		return
-	}
-	ctx, cancel := context.WithCancel(providerMediaContext(session.ctx, session.credentials))
-	defer cancel()
-	stop := context.AfterFunc(session.ctx, cancel)
-	defer stop()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.address, nil)
-	if err != nil {
-		return
-	}
-	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Referer", session.referer)
-	response, err := stream.downloader.doMediaRequest(request)
-	if err != nil {
-		return
-	}
-	defer response.Body.Close()
-	// 只接受完整响应：部分响应会在播放时触发范围请求，交给主路径处理更稳妥。
-	if response.StatusCode != http.StatusOK {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, nativeWarmAheadLimit+1))
-	if err != nil || len(body) == 0 || int64(len(body)) > nativeWarmAheadLimit {
-		return
-	}
-	asset.data = body
-	asset.total = int64(len(body))
-	asset.etag, asset.modified = response.Header.Get("ETag"), response.Header.Get("Last-Modified")
-	if response.Request != nil && response.Request.URL != nil {
-		asset.address = response.Request.URL.String()
-	}
-	session.mu.Lock()
-	session.assets[id] = asset
-	session.mu.Unlock()
 }
 
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
@@ -339,9 +236,6 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	if !found {
 		http.NotFound(writer, request)
 		return
-	}
-	if !strings.Contains(asset.contentType, "mpegurl") {
-		stream.nativeWarmAhead(session, parts[0], parts[1])
 	}
 	ctx, cancel := context.WithCancel(providerMediaContext(request.Context(), session.credentials))
 	defer cancel()

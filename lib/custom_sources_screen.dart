@@ -454,6 +454,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
   bool _ruleMode = false;
   bool _busy = false;
   String? _errorFixed;
+  String _kind = '';
 
   @override
   void initState() {
@@ -462,6 +463,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
     _base = TextEditingController(text: widget.existing?.base ?? '');
     _rule = TextEditingController(text: widget.existing?.rule ?? '');
     _ruleMode = widget.existing?.hasRule ?? false;
+    _kind = widget.existing?.kind ?? '';
     ensureTelevisionFocus(context);
   }
 
@@ -503,6 +505,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
           name: _name.text.trim(),
           base: _base.text.trim(),
           rule: rule,
+          kind: _kind,
         );
       } else {
         await widget.repository.updateCustomSource(
@@ -510,6 +513,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
           name: _name.text.trim(),
           base: _base.text.trim(),
           rule: rule,
+          kind: _kind,
         );
       }
       await widget.store.syncCustomSources(
@@ -566,6 +570,23 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
                       : '支持符合 MacCMS 规范的站点，自动适配目录、搜索与播放。',
                   helperMaxLines: 3,
                 ),
+              ),
+              DropdownButtonFormField<String>(
+                key: const ValueKey('custom-source-kind'),
+                initialValue: _kind,
+                decoration: const InputDecoration(
+                  labelText: '源类型',
+                  helperText:
+                      '自动：先探测再兜底；网页源走 HTML 抓取；JSON 源直连接口。',
+                ),
+                items: const [
+                  DropdownMenuItem(value: '', child: Text('自动（默认）')),
+                  DropdownMenuItem(value: 'web', child: Text('网页源（HTML 抓取）')),
+                  DropdownMenuItem(value: 'json', child: Text('JSON 源（直连接口）')),
+                ],
+                onChanged: _busy
+                    ? null
+                    : (value) => setState(() => _kind = value ?? ''),
               ),
               SwitchListTile(
                 key: const ValueKey('custom-source-rule-toggle'),

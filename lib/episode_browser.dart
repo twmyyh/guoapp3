@@ -17,12 +17,14 @@ class EpisodeRangeBar extends StatelessWidget {
     required this.onLocate,
     this.currentNumber,
     this.title = '选集',
+    this.note = '',
   });
   final List<Episode> episodes;
   final int page;
   final ValueChanged<int> onLocate;
   final int? currentNumber;
   final String title;
+  final String note;
 
   Future<void> _jump(BuildContext context) async {
     final controller = TextEditingController();
@@ -83,7 +85,11 @@ class EpisodeRangeBar extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  '$title · ${episodes.length} 集',
+                  [
+                    title,
+                    '${episodes.length} 集',
+                    if (note.isNotEmpty) note,
+                  ].join(' · '),
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
               ),
@@ -154,6 +160,7 @@ class EpisodeBrowser extends StatefulWidget {
     this.selectedNumbers,
     this.keyPrefix = 'episode',
     this.title = '选集',
+    this.note = '',
     this.compact = false,
     this.onExitUp,
     this.onExitDown,
@@ -164,6 +171,7 @@ class EpisodeBrowser extends StatefulWidget {
   final Set<int>? selectedNumbers;
   final String keyPrefix;
   final String title;
+  final String note;
   final bool compact;
   final VoidCallback? onExitUp;
   final VoidCallback? onExitDown;
@@ -221,6 +229,7 @@ class _EpisodeBrowserState extends State<EpisodeBrowser> {
           episodes: widget.episodes,
           page: _page,
           title: widget.title,
+          note: widget.note,
           currentNumber: widget.currentNumber,
           onLocate: (index) => setState(() {
             _page = index ~/ episodePageSize;

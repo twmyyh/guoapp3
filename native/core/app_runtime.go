@@ -116,6 +116,7 @@ type nativeInput struct {
 	Name             string                  `json:"name"`
 	Base             string                  `json:"base"`
 	Rule             string                  `json:"rule"`
+	Kind             string                  `json:"kind"` // 自定义源类型：web / json / 空=自动
 	Content          string                  `json:"content"`
 	Page             int                     `json:"page"`
 	Query            string                  `json:"query"`
@@ -493,13 +494,13 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "customSources":
 		return map[string]any{"items": engine.customMaccmsSources()}, nil
 	case "addCustomSource":
-		record, err := engine.addCustomMaccmsSource(input.Name, input.Base, input.Rule)
+		record, err := engine.addCustomMaccmsSource(input.Name, input.Base, input.Rule, input.Kind)
 		if err != nil {
 			return nil, err
 		}
 		return record, nil
 	case "updateCustomSource":
-		record, err := engine.updateCustomMaccmsSource(input.Source, input.Name, input.Base, input.Rule)
+		record, err := engine.updateCustomMaccmsSource(input.Source, input.Name, input.Base, input.Rule, input.Kind)
 		if err != nil {
 			return nil, err
 		}

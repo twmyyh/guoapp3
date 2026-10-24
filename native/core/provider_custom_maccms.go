@@ -38,6 +38,7 @@ type customMaccmsSource struct {
 	Base      string    `json:"base"`
 	Rule      string    `json:"rule,omitempty"` // XBPQ 爬虫规则 JSON（可选；为空时走模板家族识别）
 	CreatedAt time.Time `json:"createdAt,omitempty"`
+	Type      string    `json:"type,omitempty"` // 源类型：web=网页源 / json=JSON源 / 空=自动识别
 }
 
 type customMaccmsRegistry struct {
@@ -68,6 +69,7 @@ func (registry *customMaccmsRegistry) load() {
 		record.ID = strings.TrimSpace(record.ID)
 		record.Base = strings.TrimRight(strings.TrimSpace(record.Base), "/")
 		record.Name = strings.TrimSpace(record.Name)
+		record.Type = normalizeCustomSourceType(record.Type)
 		if !validCustomMaccmsRecord(record) {
 			continue
 		}
@@ -110,7 +112,7 @@ func (registry *customMaccmsRegistry) get(id string) (customMaccmsSource, bool) 
 	return record, found
 }
 
-func (registry *customMaccmsRegistry) add(name, base, rule string) (customMaccmsSource, error) {
+func (registry *customMaccmsRegistry) add(name, base, rule, kind string) (customMaccmsSource, error) {
 	name = strings.TrimSpace(name)
 	base = strings.TrimSpace(base)
 	rule = strings.TrimSpace(rule)
@@ -159,7 +161,7 @@ func (registry *customMaccmsRegistry) add(name, base, rule string) (customMaccms
 		}
 	}
 	id := customMaccmsID(base)
-	record := customMaccmsSource{ID: id, Name: name, Base: base, Rule: rule, CreatedAt: time.Now()}
+	record := customMaccmsSource{ID: id, Name: name, Base: base, Rule: rule, CreatedAt: time.Now(), Type: normalizeCustomSourceType(kind)}
 	registry.sources[id] = record
 	if err := registry.save(); err != nil {
 		delete(registry.sources, id)
@@ -178,7 +180,7 @@ func (registry *customMaccmsRegistry) remove(id string) error {
 	return registry.save()
 }
 
-func (registry *customMaccmsRegistry) replace(id, name, base, rule string) error {
+func (registry *customMaccmsRegistry) replace(id, name, base, rule, kind string) error {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	id = strings.TrimSpace(id)
@@ -224,7 +226,12 @@ func (registry *customMaccmsRegistry) replace(id, name, base, rule string) error
 		}
 	}
 	newID := customMaccmsID(base)
-	record := customMaccmsSource{ID: newID, Name: name, Base: base, Rule: rule, CreatedAt: existing.CreatedAt}
+	kind = normalizeCustomSourceType(kind)
+	newType := existing.Type
+	if kind != "" {
+		newType = kind
+	}
+	record := customMaccmsSource{ID: newID, Name: name, Base: base, Rule: rule, CreatedAt: existing.CreatedAt, Type: newType}
 	if newID != id {
 		delete(registry.sources, id)
 	}
@@ -252,6 +259,55 @@ func isCustomMaccmsSource(source string) bool {
 	return strings.HasPrefix(canonicalProviderSource(source), customSourcePrefix)
 }
 
+// ---- 源类型（web / json / 自动）----
+//
+// 自定义源可在配置里显式声明源类型，跳过运行时探测直接走对应处理模块：
+//   - "web"  ：网页源。目录/详情/搜索/取流都走 MacCMS 网页模板（或 XBPQ 规则），
+//     不再探测标准 JSON API 端点（避免对纯网页站反复打 ac=videolist 探测）。
+//   - "json" ：JSON 源。走 MacCMS 标准 JSON API 模块；API 不可用时不再回落到
+//     网页模板猜测（网页猜测对 JSON 站无意义且拖慢加载），直接报「JSON 接口不可用」。
+//   - 空 / "auto"：自动（默认）。保持现状——有 XBPQ 规则走规则，无规则时先探
+//     标准 JSON API，探不到再猜网页模板家族。
+//
+// 类型只影响「走哪个模块」的取舍，不改变各模块内部行为；填错类型会得到
+// 明确的「该源类型与站点不符」错误而非静默失败。
+
+const (
+	customSourceTypeWeb  = "web"
+	customSourceTypeJSON = "json"
+)
+
+// normalizeCustomSourceType 规整源类型取值：小写、去空白，仅保留 web/json/auto/空。
+func normalizeCustomSourceType(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case customSourceTypeWeb, customSourceTypeJSON, "auto", "":
+		return strings.ToLower(strings.TrimSpace(kind))
+	default:
+		return ""
+	}
+}
+
+// customSourceRecordOf 取自定义源在注册表里的记录（非自定义源返回 false）。
+func customSourceRecordOf(source string) (customMaccmsSource, bool) {
+	if !isCustomMaccmsSource(source) {
+		return customMaccmsSource{}, false
+	}
+	engine := nativeEngineSnapshot()
+	if engine == nil || engine.customRegistry == nil {
+		return customMaccmsSource{}, false
+	}
+	return engine.customRegistry.get(canonicalProviderSource(source))
+}
+
+// customSourceTypeFor 返回某自定义源规整后的源类型（未配置返回 ""=自动）。
+func customSourceTypeFor(source string) string {
+	record, found := customSourceRecordOf(source)
+	if !found {
+		return ""
+	}
+	return normalizeCustomSourceType(record.Type)
+}
+
 // ---- 导入导出 ----
 //
 // 导出格式：{"format":"duanju-custom-sources","version":1,"sites":[{name,url,rule}]}
@@ -269,6 +325,7 @@ type customSourceDraft struct {
 	Name string
 	Base string
 	Rule string
+	Kind string // 源类型：web / json / 空=自动
 }
 
 type customSourceImportResult struct {
@@ -292,10 +349,11 @@ func (engine *nativeEngine) exportCustomMaccmsSources() (string, error) {
 		Name string `json:"name"`
 		URL  string `json:"url"`
 		Rule any    `json:"rule,omitempty"`
+		Type string `json:"type,omitempty"` // 源类型：web / json；空=自动识别
 	}
 	items := make([]exportItem, 0, len(records))
 	for _, record := range records {
-		items = append(items, exportItem{Name: record.Name, URL: record.Base, Rule: exportRuleValue(record.Rule)})
+		items = append(items, exportItem{Name: record.Name, URL: record.Base, Rule: exportRuleValue(record.Rule), Type: record.Type})
 	}
 	payload := struct {
 		Format  string       `json:"format"`
@@ -503,7 +561,7 @@ func (engine *nativeEngine) importCustomMaccmsSources(content string) (customSou
 			continue
 		}
 		if existing, found := engine.customRegistry.get(customMaccmsID(base)); found && canonicalXBPQRule(existing.Rule) == canonicalXBPQRule(draft.Rule) {
-			record, err := engine.updateCustomMaccmsSource(existing.ID, name, base, draft.Rule)
+			record, err := engine.updateCustomMaccmsSource(existing.ID, name, base, draft.Rule, draft.Kind)
 			if err != nil {
 				result.Failed = append(result.Failed, name+"："+err.Error())
 				continue
@@ -511,7 +569,7 @@ func (engine *nativeEngine) importCustomMaccmsSources(content string) (customSou
 			result.Updated = append(result.Updated, record)
 			continue
 		}
-		record, err := engine.addCustomMaccmsSource(name, base, draft.Rule)
+		record, err := engine.addCustomMaccmsSource(name, base, draft.Rule, draft.Kind)
 		if err != nil {
 			message := err.Error()
 			if strings.Contains(message, "已存在") {
@@ -574,7 +632,25 @@ func customSourceImportBase(base, rule string) string {
 	if err != nil || parsed.Host == "" {
 		return ""
 	}
+	// MacCMS 采集端点（路径含 /api.php 或 /provide/vod，如 .../provide/vod/at/xml、.../at/json）
+	// 整体保留完整 URL：运行期 maccmsAPIEndpointCandidates 会把「base 本身」排在候选最前
+	// 直连探测，从而直接命中该采集接口（含 at/xml 的 XML 形态）。否则收敛成站点根会丢掉
+	// 端点路径，at/xml 这种站点默认只返回 XML 的接口就探不到、误判为不可用。
+	// 纯网页站点（路径无采集端点特征）仍收敛成站点根，保留原有网页模板兜底行为。
+	if isMaccmsCollectionEndpoint(base) {
+		return strings.TrimRight(base, "/")
+	}
 	return parsed.Scheme + "://" + parsed.Host
+}
+
+// isMaccmsCollectionEndpoint 判断 base 是否为 MacCMS 采集接口端点 URL：
+// 路径里出现 /api.php 或 /provide/vod 即认（覆盖 at/xml、at/json、/from/m3u8 等子路径）。
+func isMaccmsCollectionEndpoint(base string) bool {
+	path := base
+	if index := strings.Index(base, "?"); index >= 0 {
+		path = base[:index]
+	}
+	return strings.Contains(path, "/api.php") || strings.Contains(path, "/provide/vod")
 }
 
 // isSplicedAcceleratorURL 判断是否为「加速链接 + 网址」拼接形态。
@@ -721,10 +797,27 @@ func customSourceMapDrafts(rows []any, notes *[]string) []customSourceDraft {
 	return drafts
 }
 
+// customSourceKindFromEntry 从导入条目里取「源类型」字符串（web / json，空=自动）。
+// 键优先级：sourceType / source_type / 源类型 / type / kind。只有字符串取值生效；
+// TVBox 风格条目里 type 常为数字（3=jar 爬虫标记），数字不在此识别，避免冲突。
+func customSourceKindFromEntry(entry map[string]any) string {
+	for _, key := range []string{"sourceType", "source_type", "源类型", "type", "kind"} {
+		value, isString := entry[key].(string)
+		if !isString {
+			continue
+		}
+		if kind := normalizeCustomSourceType(value); kind != "" {
+			return kind
+		}
+	}
+	return ""
+}
+
 // customSourceDraftFromEntry 解析单条配置：优先规则，其次站点地址；爬虫条目给跳过原因。
 func customSourceDraftFromEntry(entry map[string]any) (*customSourceDraft, string) {
 	name := firstStringField(entry, "name", "名称", "站点名称", "title", "key", "cn")
 	base := firstStringField(entry, "url", "base", "地址", "站点地址", "link", "api", "home", "主页url")
+	kind := customSourceKindFromEntry(entry)
 	// 显式规则字段
 	if rule := firstStringField(entry, "rule", "ruleJson", "规则"); rule != "" {
 		if parsed, ok := parseXBPQRule(rule); ok {
@@ -732,7 +825,7 @@ func customSourceDraftFromEntry(entry map[string]any) (*customSourceDraft, strin
 			if home := parsed.homeURL(); home != "" {
 				candidate = home
 			}
-			return &customSourceDraft{Name: name, Base: candidate, Rule: rule}, ""
+			return &customSourceDraft{Name: name, Base: candidate, Rule: rule, Kind: kind}, ""
 		}
 	}
 	if rule := customSourceRuleFromMap(entry); rule != "" {
@@ -742,7 +835,7 @@ func customSourceDraftFromEntry(entry map[string]any) (*customSourceDraft, strin
 				candidate = home
 			}
 		}
-		return &customSourceDraft{Name: name, Base: candidate, Rule: rule}, ""
+		return &customSourceDraft{Name: name, Base: candidate, Rule: rule, Kind: kind}, ""
 	}
 	// 爬虫 jar：Go 核心无法执行，明确跳过
 	if spider := firstStringField(entry, "spider", "jar"); spider != "" || entryNumberField(entry, "type") == 3 {
@@ -755,7 +848,7 @@ func customSourceDraftFromEntry(entry map[string]any) (*customSourceDraft, strin
 	if base == "" {
 		return nil, ""
 	}
-	return &customSourceDraft{Name: name, Base: base}, ""
+	return &customSourceDraft{Name: name, Base: base, Kind: kind}, ""
 }
 
 // customSourceMapBase 从条目里取站点根地址（含 maccms api 地址收敛）。
@@ -939,8 +1032,8 @@ func (engine *nativeEngine) customMaccmsSources() []customMaccmsSource {
 	return records
 }
 
-func (engine *nativeEngine) addCustomMaccmsSource(name, base, rule string) (customMaccmsSource, error) {
-	record, err := engine.customRegistry.add(name, base, rule)
+func (engine *nativeEngine) addCustomMaccmsSource(name, base, rule, kind string) (customMaccmsSource, error) {
+	record, err := engine.customRegistry.add(name, base, rule, kind)
 	if err == nil {
 		engine.registerCustomBrowserHost(record.Base)
 	}
@@ -967,8 +1060,8 @@ func (engine *nativeEngine) registerCustomBrowserHost(base string) {
 	engine.downloader.browserTransport.registerHost(parsed.Hostname())
 }
 
-func (engine *nativeEngine) updateCustomMaccmsSource(id, name, base, rule string) (customMaccmsSource, error) {
-	if err := engine.customRegistry.replace(id, name, base, rule); err != nil {
+func (engine *nativeEngine) updateCustomMaccmsSource(id, name, base, rule, kind string) (customMaccmsSource, error) {
+	if err := engine.customRegistry.replace(id, name, base, rule, kind); err != nil {
 		return customMaccmsSource{}, err
 	}
 	record, found := engine.customRegistry.get(customMaccmsID(strings.TrimRight(strings.TrimSpace(base), "/")))

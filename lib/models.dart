@@ -9,11 +9,15 @@ class CustomSourceSite {
     required this.name,
     required this.base,
     this.rule = '',
+    this.kind = '',
   });
   final String id;
   final String name;
   final String base;
   final String rule;
+
+  /// 源类型：web=网页源（走 HTML 抓取）/ json=JSON 源（直连 API）/ 空=自动识别。
+  final String kind;
 
   factory CustomSourceSite.fromJson(Map<String, dynamic> json) =>
       CustomSourceSite(
@@ -21,12 +25,14 @@ class CustomSourceSite {
         name: json['name'] as String? ?? '',
         base: json['base'] as String? ?? '',
         rule: json['rule'] as String? ?? '',
+        kind: (json['kind'] as String? ?? json['type'] as String? ?? ''),
       );
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
     'base': base,
     if (rule.isNotEmpty) 'rule': rule,
+    if (kind.isNotEmpty) 'kind': kind,
   };
   bool get isCustom => SourceSite.isCustomId(id);
   bool get hasRule => rule.trim().isNotEmpty;

@@ -2,9 +2,93 @@
 
 自编译版加入 韩小圈，鬼片，A123（青空已下线移除）
 
-Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.4.3+96（未验证开发快照）**。
+Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.5.4+105（未验证开发快照）**。
 
-本轮（1.4.3+96）集中处理自定义源的四项优化，全部落在共享 Go 核心 `native/core/provider_custom_maccms.go`——Android / iOS / macOS / Windows 四端 App 与本地 Web 服务器版都经 `core.NativeRequest` 调它，改核心即全平台生效；Flutter 侧无副本。
+本轮（1.5.4+105）再修一个左右滑动快进/快退的残留：1.5.3 只收了画面**正中央**的快进/后退预览（`Center`），但抬手完成 `seek` 后还会调 `hint('快进至/后退至 …')`，这个确认提示默认 `revealControls: true`，会把整条控制条重新唤出并重置 **4 秒**自动隐藏定时器——于是中上部那个确认黑框（`_gestureFeedback` 里 `Alignment(0,-.5)` 那块）要等几秒才消失，观感上还是「残留」。修法是给 `seek()` 加 `immersive` 标志：左右滑动这条手势路径传 `immersive: true`，确认提示只在中上部留一行并走 `hint` 自带的 1.2 秒自动淡出，不再唤出控制条重新计时；键盘长按/方向键的 `seek` 仍保持唤出控制条（桌面键盘习惯）。`test/player_interactions_test.dart` 的左右滑用例补上抬手后 `feedbackRevealsControls == false` 的断言。
+
+本轮（1.5.3+104）补齐左右滑动快进/快退的预览 HUD 收起兜底。1.5.2 只在「严格水平」（`dx > dy*1.5`）抬手分支里收起快进/快退预览，还漏了两条路径：① 斜滑——滑动途中 `dx` 已越过水平阈值弹出预览，抬手时却既不满足水平判定也不满足垂直切集判定，`if/else` 三个分支都不命中，预览残留在画面中央；② 手势被系统打断（多指、来电走 `cancel()`）同样不会收起 seek 预览。现在 `pointerUp` 末尾统一兜底（当前 HUD 是 `seek` 就 `_dismissHud()`），`cancel()` 里对 seek HUD 走即时隐藏（亮度档仍保留延迟 1 秒收起）。`test/player_interactions_test.dart` 新增一条斜滑回归用例，交互 8 例、播放页 16 例全绿。
+
+上一轮（1.5.0+101）换掉整个播放器实现：**完整移植 guoappxxx 的播放器，删除双播放器选择**。1.4.4~1.4.7 三轮都是在保留本项目播放器的前提下逐项对齐参数，用户实测装包后 Windows 仍然「声音正常、画面跳帧」，两个播放器都卡——说明差异不在某条 mpv 参数，而在播放器整体实现（解码供帧、恢复阶梯、控件与合成层）。因此这一轮不再做参数对齐，而是直接把 guoappxxx 的播放器代码搬到本项目。
+
+1. **播放器整体替换**。`lib/player_screen.dart`、`player_controls.dart`、`player_interactions.dart`、`player_menu.dart`、`television_controls.dart` 用 guoappxxx 版本覆盖，并补入其依赖 `diary_service.dart`（播放日记）、`playback_diagnostics.dart`（会话与地址脱敏）。移植后 `player_screen.dart` 与参照版逐行 diff，只剩本项目需要的四处差异：去广告标志透传、长按倍速取用户偏好、`_storedPreferences` 快照、以及去掉从未被实例化的 LunaExo 分支。media_kit / libmpv / `Video` 组件的配置因此与参照版完全一致。
+
+2. **去掉播放器选择与 xigua 点播播放器**。播放路由只返回 `PlayerScreen`；首页下拉菜单与溢出菜单里的「播放器选择」入口删除，`PlayerPickerScreen` 从 `player_picker.dart` 移除，`lib/xigua/xigua_player_screen.dart` 删除。`lib/xigua/` 下直播共用的控件、交互、统计等文件保留（`live_player_screen.dart` 仍在用）。直播播放器与本地 Web 服务版播放器不在本次范围内，未改动。
+
+3. **保留去广告**。`PlaybackPreferences.adBlock` 仍然随 `PlaybackLoader.load` / `PlaybackPreloader.prepare` 传到核心解析接口（`repository.resolve/resolveOnline`），开关在播放菜单「播放设置」里补回（本地播放时禁用）。切换开关会 `_preloader.clear()` 并重建当前播放会话，让核心按新标志重新清洗；这一点参照版没有，属于本项目保留的能力。
+
+4. **保留左侧长按滑动调亮度**。手势层仍按落点分左右：左 35% 区域进入亮度模式（`AppDevice.getBrightness/setBrightness` 走 Android 窗口级 `screenBrightness` 覆盖，不动系统设置），其余区域是刷剧切集，不调音量；退出播放页 `resetBrightness` 复位。亮度 HUD 由参照版的中央浮层渲染（图标 + 进度条 + 百分比）。
+
+5. **恢复沉浸式手势反馈**。参照版的 `_interactionChanged` 是「有任何提示就唤出控制条」，本项目补回 `feedbackRevealsControls`：长按快进、切集、亮度这类提示只在画面中央留一行字，长按期间控制条强制退让；只有快进/后退、音量这类提示才唤出控制条。
+
+6. **随旧播放器下线的模块**。`picture_quality_ui.dart`、`picture_quality_applier.dart`（旧播放器的「画质档」面板与 `unsharp` CPU 滤镜应用器）、`windows_playback_tuning.dart`（上一轮的 Windows mpv 参数收敛，参照版不需要）、`xigua/player_menu.dart`（只被已删除的 xigua 播放页引用）一并删除。`playback_preferences` 里的 `pictureQuality` 字段保留，避免老版本存档解析失败。
+
+验证：`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning。`test/player_screen_test.dart` 按新契约重写 8 例——恢复阶梯（重复错误只刷新一次、刷新 → 备用线路 → 停止、备用线路请求延迟返回时必须丢弃）、长按快进（先让控制条按 4 秒超时退场再长按，2 倍速生效、松开恢复、提示 1.2 秒后消失）、桌面端空闲隐藏 / 鼠标唤出 / 空格暂停 / 方向键回退、手动切集保持可见。播放相关 4 个测试文件共 19 例全绿。全量 `flutter test` 与 HEAD 基线对照：基线 32 例失败、本轮 28 例失败，失败的用例集合是本轮的子集（`widget_test`/`interface_test`/`media_library_test`/`television_player_test` 等既有失败与播放器无关，另 4 例由新播放器顺带修好），无新增失败。本机无 MSVC，Windows 包由 CI 构建，真机是否仍卡需装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.5.0+101）把播放器整体换成了 guoappxxx 的实现，Android 手势与 Windows 卡顿各留一件事，本轮收掉。
+
+1. **Android 手势改成三态**（`lib/player_interactions.dart`、`lib/player_controls.dart`、`lib/playback_preferences.dart`）。移植过来的参照版手势只有两态：落点在左侧 35% 就上下滑调亮度，其余一律上下滑切集，左右滑动没有任何效果。按产品要求重做为：
+
+   - **左侧长按（350ms）再上下滑 = 调亮度**。长按先弹出红果风格亮度条（读 `AppDevice.getBrightness` 作为起点），之后上下滑按「滑动量 / 面板高度 60%」增减，抬手收起；亮度只在 Android 生效（窗口级 `screenBrightness` 覆盖），桌面端自动跳过这条分支，不会出现「有条没效果」的假调节。
+   - **短促上下滑（< 1.5s 且未长按）= 切换上/下一集**，不再看落点，左侧短滑同样是切集。
+   - **左右滑 = 快进/快退固定步长**，默认 **15 秒**（`PlaybackPreferences.swipeSeekSeconds`，可选 15/30/60/120，原默认 60 已改为 15）。滑动途中只在中央浮层给「快进 15 秒 / 后退 15 秒」预览，**抬手才真正 seek**，避免一次滑动里连续跳转把解码器拖死。
+
+   方向在首次越过 16px 时锁定（`_SwipeAxis`），之后不再改判，斜着划不会在切集和快进之间来回跳；已进入亮度档后左右滑也不再改判成快进。新增 `SwipeAction.seek` 与 HUD 的快进/后退分支（图标 + 文案）。
+
+2. **去掉「播放中顺序预取」，把数据路径对齐参照版**（`native/core/app_stream.go`）。播放器已经和 guoappxxx 逐行一致，于是把对照范围收到 Go 流代理：`app_preload.go`（开播预热 `nativePrefetch`）两项目**完全相同**，差异只剩 `app_stream.go`，而它的差异只有三处——参照版的诊断埋点、本项目的去广告清洗、以及**本项目独有的 `nativeWarmAhead`**。
+
+   `nativeWarmAhead` 是「播放器每请求一个分片，就后台再拉后续分片并整片读进内存」。1.4.7 已给它加了三条边界（单片 ≤3MB、会话封顶 24MB、窗口降为一片），但**参照项目根本不存在这一层**：它只有开播那一次预热。触发点正好在每个分片边界上——后台预取与播放器正在拉的那一片抢同一条连接预算，站源一限速就把当前分片拖慢，观感就是「播几秒就顿一下」，而且每几秒来一次。本轮直接删掉 `nativeWarmAhead` / `nativeWarmSegment` 及配套的 `order` / `warming` / `warmSkip` / `warmed` 状态和常量，播放路径与参照版一致；开播预热 `nativePrefetch`（4MB 预算、最多 8 请求）保持不变。同步删除只测这套预取的 `app_stream_warm_test.go`。
+
+   顺带确认了几个**不用再查**的点：两个项目的 `native/core` 里都没有任何 `time.Ticker` 后台轮询；全局外壳 `AppLayout` 没有 `BackdropFilter`，`liquid_glass` 在 Windows 已主动禁用玻璃；`media_library.dart` 两个项目完全一致。
+
+验证：`dart analyze lib test` 0 error / 0 warning。`test/player_interactions_test.dart` 扩到 7 例全绿——长按 3 倍速、左侧长按后上下滑调亮度并夹在 0.01~1.0、左侧**短滑**走切集不进亮度且不下发亮度、右侧上下滑切集、左右滑各 ±15 秒并给出 HUD 与提示、离开播放器复位亮度。播放相关 `player_screen_test` / `xigua_player_interactions_test` / `playback_loader_test` 全绿。Go 侧 `go build ./...`、`go vet ./core` 干净，`go test ./core -run 'Stream|Prefetch|Playback|AdBlock|Ad'` 通过。本机仍无 MSVC，Windows 包由 CI 构建，是否还顿需装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.7+100）继续追 **Windows 桌面端「播放几秒后开始卡顿」**：上一轮（1.4.4+97）清掉 d3d11vpp 与 verbose 日志后，用户实测仍比 guoappxxx 编译版卡。这一轮不再猜参数，而是把两个项目从依赖锁、Windows runner、播放器页面、弹幕层、Go 流代理逐层对齐，把差异逐条消掉。共三处，其中第一处正是上一轮自己引入的回归。
+
+1. **`framedrop=vo` 泄漏到了 Windows（上一轮的回归）**（`lib/windows_playback_tuning.dart`、`lib/xigua/xigua_player_screen.dart`）。`framedrop=vo` 的语义是「渲染稍跟不上就直接丢帧」，这是 Android TV 硬解带宽受限时才该用的策略——guoappxxx 也只把它写在 `Platform.isAndroid` 分支里，Windows 从不设（mpv 默认 `framedrop=no`，宁可平滑延迟也不跳帧）。上一轮把 `framedrop=vo` 和 `video-sync=audio` 提到了公共段，Windows 也跟着开了，于是渲染稍有压力就持续丢帧，观感就是「画面一顿一顿」。更隐蔽的是 xigua 播放器：它有一张不分平台的手机端参数表（预读压到 1 秒、`framedrop=vo`、`hr-seek-framedrop=yes`），Windows 分支虽然随后调了统一调优，但当时那套调优并不覆盖 `framedrop`，等于把丢帧留在了进程里（libmpv 是进程内单实例，属性带记忆，切播放器还会互相污染）。现在：Windows 统一调优显式写回 `framedrop=no`；xigua 的 `cache-secs`/`demuxer-readahead-secs`/`framedrop`/`hr-seek-framedrop` 四项限定在非 Windows 生效。
+
+2. **本机流代理的「播放中顺序预取」没有上限**（`native/core/app_stream.go`）。guoappxxx 的流代理只在开播时预热一次（`nativePrefetch`，4MB 预算、最多 8 个请求、只取前 8 秒）；本项目多出一套 `nativeWarmAhead`——播放器每请求一个分片，就再后台拉后两片并把**整片读进内存**，且没有总量上限、没有淘汰。HLS 一集通常几百个分片，于是：内存随播放时长线性增长，Go 堆越堆越大、GC 越来越频繁；同时后台预取与播放器正在拉的那一片抢同一条连接预算，站源一限速就把当前分片拖慢。两者都指向同一个观感——开头几秒正常，越播越卡。现在收紧三条边界：单分片超过 3MB 不预热（4K/高码率片源，读进来只是白占堆和带宽）、单会话累计预热封顶 24MB、预取窗口从两片降到一片；预取失败或超限的分片记进 `warmSkip`，不再反复重试同一个分片（否则超限分片会被一次次拉 3MB 再丢弃）。另外把 `cache-secs` 从 20 秒收回 10 秒，避免开播瞬间连发一串分片请求形成带宽洪峰。
+
+3. **Windows 上不再挂神经超分着色器**（`lib/video_enhancement_policy.dart`、`lib/video_enhancement.dart`、`lib/picture_quality_applier.dart`）。桌面端 media_kit 走 `vo=libmpv` + ANGLE（GLES over D3D11）回传纹理，RAVU / FSRCNNX / Anime4K 这些 CNN 着色器要在这条管线上再跑一遍；显卡余量不足时，着色器编译生效的那一刻（通常在开播几秒后）就开始持续掉帧。上一轮为了让增强「不再永远是原画」放宽了 GPU 判定，恰好让它更容易真正生效。现在给策略加 `windows` 维度：成本上限固定为 1，只允许 mpv 内建的「高质量缩放」（只改 scale/cscale，开销可忽略），神经超分档位不上；画质菜单里的 Anime4K 在 Windows 上归一化到内建锐化（归一化在入口完成，否则档位判定与实际挂载的效果不一致，会退化成每次 `videoParams` 变化都重建滤镜链）。
+
+排查过程中确认无需改动的项（避免下次重复排查）：`pubspec.lock` 里 media_kit / media_kit_video / media_kit_libs_windows_video 版本完全一致，两项目都用 Flutter 3.47.4；`windows/` runner 只有应用名与图标差异；`Video` 组件、`VideoControllerConfiguration`、`bufferSize=32MB`、`logLevel=error` 两边相同；播放器的 position/videoParams 订阅、`_saveTimer`(5s)/`_healthTimer`(1s)、弹幕渲染层、预加载触发条件逐行一致；`playback_recovery` 的卡住阈值相同（本项目重试次数更宽松）。
+
+验证：新增 `native/core/app_stream_warm_test.go` 3 例（超限分片只请求一次且标记跳过、预算耗尽后零请求、单次只预取一片且预算只累计真实缓存字节），`go test ./core -run "TestWarmAhead|TestAdFilter|TestNativeStream"` 全绿；`go build ./...`、`go vet ./core`、`gofmt` 干净。`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning（110 条为既有 info 级风格 lint），`dart format` 已跑。本机无 MSVC，Windows 包由 CI 构建，真机流畅度待装包验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.6+99）修一个用户实测报障：**导入 hanjuds（`www.hanjuds.com`）的 XBPQ 规则后，本地服务版一律提示「规则未抽取到列表条目」，但同一条规则在写源工具里是好的**。排查结论：规则本身没问题，是两层问题叠在一起——传输层选错了通道，上层又把真实错误吞了。
+
+1. **自定义源 host 的传输通道选错（根因）**（`native/core/network_browser.go`）。`registerCustomBrowserHost` 会把每个自定义源 host 登记进「浏览器指纹传输」白名单，命中后请求改走 tls-client 的 Chrome 150 指纹（utls）。实测该站对这套指纹直接返回 `403` + `cf-mitigated: challenge`，而标准 Go 传输（带规则里的 `请求头`）稳定 200；用 tls-client 试 Chrome 120/133/150 四种指纹全部被挡，确认不是 UA 或版本号问题。现在把运行期登记的自定义源 host 与内置 Browser 源区分开：**先走标准传输**（吃规则里的 UA，绝大多数站点本就够用），只有真的拿到验证页（403/429/503 且带 `cf-mitigated: challenge`，或 403）才升级到指纹传输，并在进程内记住该 host 后续直连指纹通道——CF 前缀加速源照旧能用，普通 CMS 站不再被误伤。内置 Browser 源（`huangguo.video` 等静态白名单）行为不变。切换通道时写一条 `network.browser_request` 诊断，便于定位站点拦截。
+
+2. **抓取失败被伪装成规则问题**（`native/core/provider_xbpq.go`）。`xbpqExtractItems` 原来是 `if err != nil || body == "" { return nil }`，403、超时、DNS 失败全被压成空列表，上层统一报「规则未抽取到列表条目」——用户只会去改规则，方向完全被带偏，这次排障也正因此多绕了几圈。现在抓取错误原样上抛，`xbpqCatalog` / `xbpqSearch` 分别报「规则列表页抓取失败：<原因>」「搜索页抓取失败：<原因>」；确实是 0 条时，错误里带上实际生效的 `数组` 模式并提示「没有匹配到站点结构」，写规则的人可以直接对照页面 HTML 判断是模式写错还是站点改版。
+
+验证：新增 `native/core/network_browser_test.go` 4 例（自定义源先用标准传输、撞上验证页才升级且只升级一次、内置 Browser 源仍直接用指纹、未登记 host 不受影响）与 `native/core/provider_xbpq_hanjuds_test.go` 4 例（真实列表页样本抽出 50+ 条且首条标题/ID/封面正确、403 报「抓取失败」而非「未抽取到条目」、空页面提示数组不匹配、`播放列表=</a>` 切出 3 集）。样本页 `native/core/testdata/xbpq_hanjuds_list.html` 为该规则的真实分类页。`go test ./core -run TestXBPQ` 全绿，`go build ./...`、`go vet ./core ./server`、`gofmt` 干净；全量 `go test ./core` 仍是那 6 个既有失败（HLS 重定向、弹幕 emoji、legacy session、红果榜单、目录缓存、剧源分类），与本轮无关。另用编译后的本地服务实测该规则：目录 55 条 / 第 2 页 57 条、详情标题正确、剧集类分集数 9 / 2 / 16 与页面一致、`播放列表` 切出的分集地址正确、取流拿到真实 m3u8 且 `/api/media/` 代理 200、搜索「人生复本」命中 2 条。改动在共享 Go 核心，四端 App 与本地 Web 服务版同时生效；按约定本轮为未验证开发快照。
+
+上一轮（1.4.5+98）把 **wrxbpq 写源工具的 XBPQ 更新同步进本项目的内嵌引擎**，重点是内置模板库。`wrxbpq/internal/xbpq/template.go` 是模板的唯一真源（那边实测新皮肤后先改它），本次按它逐项对齐 `native/core/provider_xbpq_template.go`，共四处。
+
+1. **MacCMS 家族的 match 与数组锚点放宽**（`provider_xbpq_template.go`）。分类url 识别正则由 `/index\.php/vod/(show|type)/|/vod(show|type)[/_]|vod-list-id-` 放宽为 `/index\.php/(vod|art)/|/vod(show|type|play|detail)/|/list/(?:\{cateId\}|[0-9])[^/"]*\.html|vod-(list|play)-id-`：补齐 `art` 频道的 `/index.php/art/…`、`/vodplay/`、`/voddetail/`、`/list/{cateId}-{catePg}.html` 伪静态和 `vod-play-id-` 短路径形态。模板库 §8之一（555yx.vip 式 mxone poster-items）与 §8之二（qqys01 式 dash vodshow）都靠这个家族兜底，此前形态不在正则里的站会退化到「通用高频」，只剩标题/链接/图片三个默认字段。数组链首个备选补回 `<a ` 前缀（`<a class="myui-vodlist__thumb&&</a>`）——myui 皮肤的 `<a>` 由 class 起头，缺了开标签个别皮肤下 `链接` 会截空。
+
+2. **路径式家族的 match 与播放数组**。match 由 `(show|vs|vshow|screen|list)/?\{?cateId\}?` 改为 `(show|vs|vshow|screen|list|type|category|fenlei)/(?:\{cateId\}|[0-9a-z])`：补 `type`/`category`/`fenlei` 三类常见目录名（英文 slug 分类 `/type/{slug}/{page}/` 属这一族），同时去掉「`cateId` 可省略」的松匹配——旧正则连裸 `/list/` 都能命中，会把不该套模板的站也套上。播放数组补 `<ul class="myui-content__list&&</ul>`、`<ul class="content-list&&</ul>` 两个容器备选。
+
+3. **修掉路径式家族的 `播放列表`**。原来写的是 `<a&&</a>||<li&&</li>`，但 `播放列表` 是分集**分隔符**（引擎里是字面 `strings.Split`），不是截取串——按整串切永远切不中，HTML 整段会被当成 1 集。改为 `<li`（与 wrxbpq 一致）。为了让这个唯一分隔符不至于在「`<a>` 连排」容器（`module-play-list` 一类，容器里没有 `<li>`）上反向塌成 1 集，`xbpqEpisodes` 加了分隔符自适应：主分隔符只切出 ≤1 段、且这段里出现 ≥2 个 `href=` 时，说明整段其实是被吞掉的多个分集，改用 `<a` 重切并取更多的一侧；单片电影容器里本来就只有一个 `href`，不会误触发（另有反例用例守着）。
+
+4. **列表封面字段按新字段字典取值**。新写源工具把列表层封面写成 `列表图片`（`图片`/`主图`/`封面图` 都是它的别名，详情封面才是 `封面`）。`xbpqCatalog` 原先按 `("图片","列表图片","主图")` 取，规则同时写了 `图片`（详情用）与 `列表图片` 时会取错；改为优先 `列表图片`，搜索层同样补上 `主图`/`封面图` 别名。
+
+验证：新增 `native/core/provider_xbpq_template_test.go` 5 例——家族命中矩阵（mxone / MacCMS 各形态 / 路径式各形态 / 通用高频兜底）、路径式分隔符必须切出 3 集、`<a>` 连排容器自适应切出 2 集、单片电影保持 1 集、列表封面取 `列表图片`；`go test ./core -run TestXBPQ` 全绿（原有 16 例一并回归）。`go build ./...`、`go vet ./core` 通过，`gofmt` 干净。全量 `go test ./core` 仍有 6 个失败，与上一轮记录的既有 flaky / 需联网用例完全一致（HLS 重定向、弹幕 emoji、legacy session、红果榜单、目录缓存、剧源分类），不在本轮改动文件内。真实站点的简写规则效果待装包后实测；按约定本轮为未验证开发快照。
+
+上一轮（1.4.4+97）参照 guoappxxx 项目的 Windows 播放调优结论，集中处理 **Windows 桌面端播放卡顿与花屏**。改动全部在 Flutter 侧（`lib/`），不影响 Android / iOS / macOS 与本地 Web 服务版。五处：
+
+1. **移除 Windows「硬件增强（d3d11vpp）」档**（`lib/video_enhancement_policy.dart`、`lib/video_enhancement.dart`）。该档用 `vf add d3d11vpp=scale=...:format=nv12` 让显卡驱动做缩放，但 Windows 的硬解自 guoappxxx 起已改为 `d3d11va-copy`（解码后拷回系统内存），帧不再留在 GPU 上的 D3D11 纹理里，`d3d11vpp` 拿不到可处理的输入，轻则整档失效、重则画面撕裂 / 绿边花屏。参考文献项目的结论直接删除该档：枚举值 `VideoEnhancementBackend.hardware`、「清晰优先」模式的命中分支、`_hardwareFramesChanged()` 生效确认、`_failBackend` 的特殊降档、状态文案与 `_vendor`/`_filterLabel` 相关遗留一并清除。删档后「清晰优先」在真人片上落到 `fsrcnnx`（神经超分）或 `ravu`，行为与 guoappxxx 一致。
+
+2. **Windows 关闭 libmpv verbose 日志**（`lib/player_screen.dart`、`lib/xigua/xigua_player_screen.dart`）。此前 `logLevel` 在 Windows 上特意开到 `MPVLogLevel.v`，为了从 `vo/gpu` 日志里嗅探 `GL_VENDOR` 判断显卡厂商。代价是 mpv 每一行日志都要跨 FFI 生成一个 `PlayerLog` 事件回 Dart，播放时每秒上千行，本身就成了抖动的来源。改为全平台 `MPVLogLevel.error`。
+
+3. **修正渲染环境判定，增强不再「永远是原画」**（`lib/video_enhancement.dart`）。`_gpu` 原判定是 `vo == 'libmpv' && (_renderer.isNotEmpty || passes is Map)`，而 `_renderer` 只有 verbose 日志才有，第 2 项关掉 verbose 后 Windows 会永久判为软件渲染、画质增强整条失效（guoappxxx 0.2.72 修过同一个坑）。改为 `vo == 'libmpv' && (Platform.isWindows || _renderer.isNotEmpty || passes is Map)`：Windows 上 `vo` 恒为 libmpv，直接认定 GPU 管线可用，真正的软件渲染仍由 `_softwareRenderer` 否决。同时给着色器档加兜底确认——拿不到 `vo-passes` 时（关掉 verbose 后很常见）改用「着色器是否还挂在 `glsl-shaders` 上」判定生效，避免 `_confirmationMisses` 累计 5 次后把增强误降成原画。
+
+4. **新增 `lib/windows_playback_tuning.dart`，Windows 端 mpv 参数收敛到一处**。原来 guo 播放器只有一行 `hwdec=d3d11va-copy`，xigua 播放器在 Windows 上**根本没设硬解**（走 media_kit 默认 `hwdec=auto`，即零拷贝 `d3d11va`，正是绿边 / 花屏的来源）。新模块由两个播放器共用，在 `Player.open` 之前下发：`hwdec=d3d11va-copy`（零拷贝互操作在部分 NVIDIA / Intel 驱动上会绿边花屏，copy 最稳）；`cache-on-disk=no`（网络流缓存不落盘，避免磁盘 I/O 抖动变成卡顿）；`hr-seek=no`（流式源上精确寻址要等目标帧重新解码，拖进度条会明显卡住，改关键帧寻址即时响应）；`cache-secs=20` / `demuxer-readahead-secs=20`（短剧单集小，内存缓存足够，网络抖动不再直接打进画面）；`framedrop=vo` + `video-sync=audio`（显卡跟不上时丢帧而不是把 A/V 延迟越拖越长）。单个属性不被当前 libmpv 版本识别时跳过，不影响其余项。
+
+5. **同档位不重复重建滤镜链**（`lib/picture_quality_applier.dart`）。该应用器监听 `videoParams`，片源尺寸每次变化（切集、窗口拉伸、开播时参数分几次到齐）都会 `clear + re-add` 一遍效果；`vf remove/add` 会重建 mpv 滤镜链，渲染管线会闪一下，开播瞬间容易看成卡顿或半帧花屏。新增「档位 + 效果是否仍挂载」对账，档位没变且效果还在就直接跳过。
+
+验证：`dart analyze lib test integration_test test_driver`（与 CI 同范围）0 error / 0 warning，余下 110 条均为既有 info 级 lint（`curly_braces_in_flow_control_structures` 等风格项，改动文件未新增）；`dart format` 已对六个改动文件跑过。本机无 MSVC 工具链、`flutter test` 播放器用例耗时过长未跑完，Windows 包与测试交由 GitHub Actions 构建，真机流畅度与花屏改善待重新安装后验收；按约定本轮为未验证开发快照。
+
+上一轮（1.4.3+96）集中处理自定义源的四项优化，全部落在共享 Go 核心 `native/core/provider_custom_maccms.go`——Android / iOS / macOS / Windows 四端 App 与本地 Web 服务器版都经 `core.NativeRequest` 调它，改核心即全平台生效；Flutter 侧无副本。
 
 1. 自定义源去除 32 个数量上限。删除 `customSourceMaxCount=32` 常量与 `add()` 里的数量检查，自定义源不再有数量限制（规则内容 256KB、导入文件 8MB 的单条 / 单文件上限保持不变）。
 2. 「加速链接 + 网址」拼接地址作为整体识别处理。此前 `customSourceImportBase` 会把任何地址收敛成 `scheme://host`，形如 `https://cfkua.wokaotianshi.eu.org/https://caiji.maotaizy.cc` 这类「加速域名 / 真实网址」拼接串会被截成 `https://cfkua.wokaotianshi.eu.org`，丢掉拼接部分导致取流指向错误的加速域名。新增 `isSplicedAcceleratorURL()`：当字符串出现第二个 `://` 且 `url.Parse` 后路径本身以 `http(s)://` 开头即判为拼接形态，`customSourceImportBase` 命中时整体保留（去尾 `/`），普通 maccms api / 裸域名仍按旧逻辑收敛到站点根，避免误判。

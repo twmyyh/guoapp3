@@ -11,8 +11,7 @@ enum VideoEnhancementBackend {
   scaling(1, '高质量缩放'),
   ravu(2, '轻量增强'),
   fsrcnnx(3, '通用神经超分'),
-  anime(3, '动漫神经超分'),
-  hardware(4, '硬件增强');
+  anime(3, '动漫神经超分');
 
   const VideoEnhancementBackend(this.cost, this.label);
   final int cost;
@@ -128,9 +127,16 @@ VideoEnhancementDecision chooseVideoEnhancement({
   required bool ready,
   required bool android,
   required bool television,
+
+  /// Windows 桌面端：只允许 mpv 内建的高质量缩放，不挂 GLSL 神经超分。
+  ///
+  /// 桌面端 media_kit 走 ANGLE（GLES over D3D11）回传纹理，神经超分着色器
+  /// 要在这个管线上额外跑一遍 CNN；一旦显卡余量不足，着色器生效的那一刻
+  /// （通常在开播几秒后）就开始持续掉帧，观感就是「播几秒后一顿一顿」。
+  /// 缩放档只调整 mpv 的 scale/cscale 参数，开销可以忽略。
+  bool windows = false,
   required bool gpu,
   required bool luma,
-  required bool hardware,
   required bool animation,
   required VideoEnhancementPower power,
   required double rate,
@@ -169,7 +175,15 @@ VideoEnhancementDecision chooseVideoEnhancement({
   final maxPixels = android || television ? 2073600.0 : 8294400.0;
   final maxDimension = android || television ? 4096.0 : 8192.0;
   final scale = math.min(
-    targetScale,
+    // Windows 桌面端一律不放大输出尺寸。
+    //
+    // 桌面走 `vo=libmpv`：mpv 渲染到一个 FBO，media_kit 再把这块纹理交给
+    // Flutter 合成。输出尺寸一旦从 1080p 放大到 2160p，每帧要经 ANGLE
+    // 回传并上传 4 倍像素量（1080p 每帧约 8MB，2160p 约 33MB），
+    // 60Hz 下就是每秒 2GB 级别的搬运，GPU 与显存带宽很快见底，
+    // 于是视频输出跟不上音频时钟——声音正常、画面跳帧。
+    // 桌面窗口本身就够大，交给 Flutter 在最终合成时缩放即可。
+    windows ? 1.0 : targetScale,
     math.min(
       2.0,
       math.min(
@@ -225,7 +239,11 @@ VideoEnhancementDecision chooseVideoEnhancement({
   if (pixels <= 0) return scaling;
   final limit = math.min(
     costLimit,
-    television || power.lowMemory || android ? 2 : 4,
+    windows
+        ? 1
+        : television || power.lowMemory || android
+        ? 2
+        : 4,
   );
   bool allowed(VideoEnhancementBackend backend) =>
       backend.cost <= limit && !rejected.contains(backend);
@@ -234,17 +252,6 @@ VideoEnhancementDecision chooseVideoEnhancement({
       (pixels * 8 * 18 + output.width * output.height * 8 * 3) / (1024 * 1024);
   final neuralSize = !android;
   final neural = neuralSize && neuralMemory <= memory && rate < 1.5;
-  if (preferences.mode == VideoEnhancementMode.quality &&
-      !animation &&
-      hardware &&
-      !power.onBattery &&
-      allowed(VideoEnhancementBackend.hardware)) {
-    return VideoEnhancementDecision(
-      VideoEnhancementBackend.hardware,
-      output,
-      '驱动增强效果以原画对比为准',
-    );
-  }
   if (animation && neural && allowed(VideoEnhancementBackend.anime)) {
     return VideoEnhancementDecision(VideoEnhancementBackend.anime, output, '');
   }

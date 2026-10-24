@@ -20,7 +20,7 @@ class PlaybackPreferences {
     this.preload = true,
     this.adBlock = true,
     this.holdSpeed = 2,
-    this.swipeSeekSeconds = 60,
+    this.swipeSeekSeconds = 15,
     this.autoPictureInPicture = true,
     this.enhancement = const VideoEnhancementPreferences(),
     this.pictureQuality = const PictureQualityPreferences(),
@@ -91,7 +91,7 @@ class PlaybackPreferences {
     final preload = value['preload'] as bool? ?? true;
     final adBlock = value['adBlock'] as bool? ?? true;
     final holdSpeed = (value['holdSpeed'] as num? ?? 2).toDouble();
-    final swipeSeekSeconds = value['swipeSeekSeconds'] as int? ?? 60;
+    final swipeSeekSeconds = value['swipeSeekSeconds'] as int? ?? 15;
     final autoPictureInPicture = value['autoPictureInPicture'] as bool? ?? true;
     if (!playbackSpeeds.contains(speed) ||
         !holdSpeeds.contains(holdSpeed) ||

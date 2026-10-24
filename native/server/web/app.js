@@ -1955,7 +1955,12 @@ function customSourceSave(record, editing) {
   return fetch('/api/custom-sources' + (editing ? '/' + encodeURIComponent(record.id) : ''), {
     method: editing ? 'PUT' : 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: record.name, base: record.base, rule: record.rule || '' }),
+    body: JSON.stringify({
+      name: record.name,
+      base: record.base,
+      rule: record.rule || '',
+      kind: record.kind || ''
+    }),
   }).then(function (response) {
     return response.json().then(function (data) {
       if (!data || !data.id) {
@@ -2421,6 +2426,13 @@ function openCustomSourceEditor(existing) {
     '<label style="display:block;font-size:12px;opacity:0.8;margin-bottom:4px">源网址（MacCMS 站点根地址）</label>' +
     '<input id="cs-base" class="search" type="url" placeholder="https://example.com" ' +
     'style="width:100%;margin-bottom:12px" value="' + escapeHTML(existing ? existing.base : '') + '" />' +
+    '<label style="display:block;font-size:12px;opacity:0.8;margin-bottom:4px">源类型（快速判定走网页模块还是 JSON API 模块）</label>' +
+    '<select id="cs-kind" class="search" ' +
+    'style="width:100%;margin-bottom:12px;background:var(--bg,#12161f);color:inherit;border:1px solid var(--border,#333);border-radius:8px;padding:8px">' +
+    '<option value=""' + (!existing || !existing.type ? ' selected' : '') + '>自动（默认，先探测再兜底）</option>' +
+    '<option value="web"' + (existing && existing.type === 'web' ? ' selected' : '') + '>网页源（MacCMS 站点，走 HTML 抓取）</option>' +
+    '<option value="json"' + (existing && existing.type === 'json' ? ' selected' : '') + '>JSON 源（ac=videolist/list 接口，直连 API）</option>' +
+    '</select>' +
     '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px">' +
     '<input id="cs-rule-on" type="checkbox"' + (hasRule ? ' checked' : '') + ' /> 使用 XBPQ 爬虫规则（粘贴规则 JSON，按字段截取）</label>' +
     '<div id="cs-rule-wrap" style="display:' + (hasRule ? 'block' : 'none') + '">' +
@@ -2436,6 +2448,7 @@ function openCustomSourceEditor(existing) {
   document.body.appendChild(overlay);
   var nameInput = document.getElementById('cs-name');
   var baseInput = document.getElementById('cs-base');
+  var kindInput = document.getElementById('cs-kind');
   var ruleToggle = document.getElementById('cs-rule-on');
   var ruleWrap = document.getElementById('cs-rule-wrap');
   var ruleInput = document.getElementById('cs-rule');
@@ -2471,7 +2484,13 @@ function openCustomSourceEditor(existing) {
         return;
       }
       saveButton.disabled = true;
-      customSourceSave({ id: existing ? existing.id : '', name: name, base: base, rule: rule }, !!existing)
+      customSourceSave({
+        id: existing ? existing.id : '',
+        name: name,
+        base: base,
+        rule: rule,
+        kind: kindInput ? kindInput.value : ''
+      }, !!existing)
         .then(function () {
           return Promise.all([customSourceList(), loadSources()]);
         })

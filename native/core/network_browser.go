@@ -30,6 +30,12 @@ type huangguoBrowserTransport struct {
 	mu        sync.Mutex
 	clients   map[string]browserHTTPClient
 	newClient func(string) (browserHTTPClient, error)
+	// custom 是运行期登记的自定义源 host（registerHost）。这类站点形态各异，
+	// 浏览器指纹并非总是更优：实测部分站点（如 hanjuds 一类普通 CMS）对 utls
+	// 指纹直接返回 403 Cloudflare 验证页，而标准 Go 传输可以正常拿到 200。
+	// 因此它们先走标准传输，只有真被验证页拦住（challenged）才升级到浏览器指纹。
+	custom   map[string]bool
+	upgraded map[string]bool
 }
 
 func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader) *huangguoBrowserTransport {
@@ -37,7 +43,8 @@ func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader)
 	transport := &huangguoBrowserTransport{
 		base: base, router: downloader.proxyRouter, hosts: browserTransportHosts(configured.Host),
 		insecure: downloader.cfg.InsecureTLS, record: downloader.recordDiagnostic,
-		clients: make(map[string]browserHTTPClient),
+		clients: make(map[string]browserHTTPClient), custom: make(map[string]bool),
+		upgraded: make(map[string]bool),
 	}
 	transport.newClient = transport.createClient
 	return transport
@@ -60,31 +67,76 @@ func browserTransportHosts(huangguoVideoHost string) map[string]bool {
 }
 
 func (transport *huangguoBrowserTransport) matches(request *http.Request) bool {
-	if request.Method != http.MethodGet && request.Method != http.MethodHead {
-		return false
-	}
-	if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
+	if !browserEligibleRequest(request) {
 		return false
 	}
 	host := strings.ToLower(request.URL.Hostname())
 	transport.mu.Lock()
 	after := transport.hosts[strings.ToLower(request.URL.Host)] || transport.hosts[host]
+	if !after {
+		// 自定义源 host 只有在被验证页拦住过之后才用指纹传输。
+		after = transport.upgraded[host]
+	}
 	transport.mu.Unlock()
 	return after
 }
 
-// registerHost 动态把一个 host 加入浏览器指纹传输白名单。
+// browserEligibleRequest 只有 GET/HEAD 的 http(s) 请求才适合改换指纹传输。
+func browserEligibleRequest(request *http.Request) bool {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		return false
+	}
+	return request.URL.Scheme == "http" || request.URL.Scheme == "https"
+}
+
+// isCustomHost 判断 host 是否由 registerHost 运行期登记（自定义源）。
+func (transport *huangguoBrowserTransport) isCustomHost(request *http.Request) bool {
+	host := strings.ToLower(request.URL.Hostname())
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.custom[host] || transport.custom[strings.ToLower(request.URL.Host)]
+}
+
+// promoted 判断自定义源 host 是否已确认需要浏览器指纹（曾被验证页拦住过）。
+func (transport *huangguoBrowserTransport) promoted(request *http.Request) bool {
+	host := strings.ToLower(request.URL.Hostname())
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.upgraded[host]
+}
+
+func (transport *huangguoBrowserTransport) promote(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return
+	}
+	transport.mu.Lock()
+	transport.upgraded[host] = true
+	transport.mu.Unlock()
+}
+
+// browserChallengeStatus 判断是否值得换浏览器指纹再试一次。
+// 只认 403：Cloudflare 的 managed challenge 固定用 403 + `cf-mitigated: challenge`，
+// 而站点本身的权限拒绝也是 403——后者多花一次请求就返回，代价可接受；
+// 429/503 属于限流与维护，换指纹只会加重负担，不重试。
+func browserChallengeStatus(response *http.Response) bool {
+	return response != nil && response.StatusCode == http.StatusForbidden
+}
+
+// registerHost 动态把一个 host 加入浏览器指纹传输候选集。
 // 自定义源（含「加速链接+真实网址」拼接形态的 Cloudflare 前缀加速源）在新增、更新与
-// 加载时调用它，让该 host 的目录/页面请求走 Chrome 150 指纹 + 独立 Cookie 会话，
-// 拿到与内置 Browser 源一致的 TLS/HTTP2 指纹，降低被 Cloudflare 判为 bot 的概率，
-// 并让源站 Set-Cookie 下发的 cf_clearance 在会话内被复用。
+// 加载时调用它。这类 host 与内置 Browser 源不同：先按标准 Go 传输取一次，
+// 只有返回 Cloudflare 验证页时才升级到 Chrome 指纹传输，并记住该 host，
+// 之后同进程内一直用指纹传输。
 func (transport *huangguoBrowserTransport) registerHost(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
 		return
 	}
 	transport.mu.Lock()
-	transport.hosts[host] = true
+	if !transport.hosts[host] {
+		transport.custom[host] = true
+	}
 	transport.mu.Unlock()
 }
 
@@ -190,9 +242,47 @@ func standardBrowserHeaders(headers fhttp.Header) http.Header {
 }
 
 func (transport *huangguoBrowserTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	// 自定义源 host：先用标准传输（能带上规则里的 请求头/UA，且不少站点对
+	// utls 指纹直接回 403 验证页），只有真的撞上验证页才升级到浏览器指纹。
+	if browserEligibleRequest(request) && transport.isCustomHost(request) && !transport.promoted(request) {
+		response, err := transport.base.RoundTrip(request)
+		if err != nil || !browserChallengeStatus(response) {
+			return response, err
+		}
+		status := response.StatusCode
+		mitigated := response.Header.Get("Cf-Mitigated")
+		if response.Body != nil {
+			response.Body.Close()
+		}
+		transport.promote(request.URL.Hostname())
+		message := "自定义源返回 403，已改用浏览器指纹重试"
+		if strings.Contains(strings.ToLower(mitigated), "challenge") {
+			message = "自定义源被 Cloudflare 验证页拦截，已改用浏览器指纹重试"
+		}
+		transport.recordEvent(request, status, message)
+		return transport.browserRoundTrip(request)
+	}
 	if !transport.matches(request) {
 		return transport.base.RoundTrip(request)
 	}
+	return transport.browserRoundTrip(request)
+}
+
+// recordEvent 在切换传输通道时留一条诊断，便于用户定位站点拦截行为。
+func (transport *huangguoBrowserTransport) recordEvent(request *http.Request, status int, message string) {
+	if transport.record == nil || request == nil || request.URL == nil {
+		return
+	}
+	source := sourceHuangguoVideo
+	if transport.isCustomHost(request) {
+		source = ""
+	}
+	transport.record(diagnosticEvent{Event: "network.browser_request", Level: "warning", Source: source,
+		Host: request.URL.Hostname(), HTTPStatus: status, Client: huangguoBrowserProfile,
+		ResponseType: "text/html", Message: message})
+}
+
+func (transport *huangguoBrowserTransport) browserRoundTrip(request *http.Request) (*http.Response, error) {
 	client, err := transport.client(request)
 	if err != nil {
 		return nil, fmt.Errorf("黄果浏览器客户端初始化失败：%w", publicError(err))
@@ -230,7 +320,11 @@ func (transport *huangguoBrowserTransport) RoundTrip(request *http.Request) (*ht
 		if result.StatusCode >= 400 || strings.EqualFold(result.Header.Get("Cf-Mitigated"), "challenge") {
 			level = "warning"
 		}
-		transport.record(diagnosticEvent{Event: "network.browser_request", Level: level, Source: sourceHuangguoVideo,
+		source := sourceHuangguoVideo
+		if transport.isCustomHost(request) {
+			source = ""
+		}
+		transport.record(diagnosticEvent{Event: "network.browser_request", Level: level, Source: source,
 			Host: request.URL.Hostname(), HTTPStatus: result.StatusCode, Client: huangguoBrowserProfile,
 			Protocol: result.Proto, CFRay: truncate(result.Header.Get("Cf-Ray"), 128),
 			ResponseType: truncate(result.Header.Get("Content-Type"), 128), Message: "黄果浏览器指纹请求完成"})

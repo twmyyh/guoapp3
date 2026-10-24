@@ -62,10 +62,10 @@ func TestCustomSourceImportTVBoxMessyJSON(t *testing.T) {
 	if len(result.Added) != 3 {
 		t.Fatalf("应导入 3 站，实际 %+v", result.Added)
 	}
-	if result.Added[0].Base != "https://a.example.com" {
-		t.Fatalf("api 应收敛为站点根地址: %s", result.Added[0].Base)
+	if result.Added[0].Base != "https://a.example.com/api.php/provide/vod" {
+		t.Fatalf("采集端点应保留完整 URL: %s", result.Added[0].Base)
 	}
-	if result.Added[2].Base != "https://c.example.com" {
+	if result.Added[2].Base != "https://c.example.com/api.php/provide/vod" {
 		t.Fatalf("含非法转义 \\' 的条目应导入: %s", result.Added[2].Base)
 	}
 }
@@ -105,10 +105,10 @@ func TestCustomSourceRemoteURLImport(t *testing.T) {
 
 func TestCustomSourceResetRestoresBuiltInOnly(t *testing.T) {
 	engine := newCustomTestEngine(t)
-	if _, err := engine.addCustomMaccmsSource("站一", "https://one.example.com", ""); err != nil {
+	if _, err := engine.addCustomMaccmsSource("站一", "https://one.example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.addCustomMaccmsSource("站二", "https://two.example.com", ""); err != nil {
+	if _, err := engine.addCustomMaccmsSource("站二", "https://two.example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	removed, err := engine.resetCustomMaccmsSources()
@@ -129,17 +129,17 @@ func TestCustomSourceResetRestoresBuiltInOnly(t *testing.T) {
 		t.Fatal("恢复默认未落盘")
 	}
 	// 恢复后可以继续正常添加
-	if _, err := engine.addCustomMaccmsSource("站三", "https://three.example.com", ""); err != nil {
+	if _, err := engine.addCustomMaccmsSource("站三", "https://three.example.com", "", ""); err != nil {
 		t.Fatalf("恢复后添加失败: %v", err)
 	}
 }
 
 func TestCustomSourceExportImportRoundTrip(t *testing.T) {
 	engine := newCustomTestEngine(t)
-	if _, err := engine.addCustomMaccmsSource("我的影院", "https://my.example.com", ""); err != nil {
+	if _, err := engine.addCustomMaccmsSource("我的影院", "https://my.example.com", "", ""); err != nil {
 		t.Fatalf("添加失败: %v", err)
 	}
-	if _, err := engine.addCustomMaccmsSource("", "", xbpqCutRuleJSON); err != nil {
+	if _, err := engine.addCustomMaccmsSource("", "", xbpqCutRuleJSON, ""); err != nil {
 		t.Fatalf("规则源添加失败: %v", err)
 	}
 	content, err := engine.exportCustomMaccmsSources()
@@ -265,15 +265,15 @@ func TestCustomSourceImportTVBoxSites(t *testing.T) {
 	if ruleRecord.Base != "https://x.example.com" {
 		t.Fatalf("规则源 base 错误: %q", ruleRecord.Base)
 	}
-	// 采集站收敛到根地址
+	// 采集站保留完整端点
 	var apiRecord *customMaccmsSource
 	for index := range result.Added {
 		if result.Added[index].Rule == "" {
 			apiRecord = &result.Added[index]
 		}
 	}
-	if apiRecord == nil || apiRecord.Base != "https://collect.example.com" {
-		t.Fatalf("api 地址未收敛: %+v", result.Added)
+	if apiRecord == nil || apiRecord.Base != "https://collect.example.com/api.php/provide/vod" {
+		t.Fatalf("api 地址应保留完整端点: %+v", result.Added)
 	}
 }
 
@@ -291,7 +291,7 @@ func TestCustomSourceSplicedAcceleratorPreserved(t *testing.T) {
 	engine := newCustomTestEngine(t)
 	// 加速链接+网址拼接形态：必须作为整体保留，不能只取斜杠前的加速域名。
 	spliced := "https://cfkua.wokaotianshi.eu.org/https://caiji.maotaizy.cc"
-	record, err := engine.addCustomMaccmsSource("拼接源", spliced, "")
+	record, err := engine.addCustomMaccmsSource("拼接源", spliced, "", "")
 	if err != nil {
 		t.Fatalf("拼接地址添加失败: %v", err)
 	}
@@ -308,14 +308,14 @@ func TestCustomSourceSplicedAcceleratorPreserved(t *testing.T) {
 	if len(result.Added) != 1 || result.Added[0].Base != spliced {
 		t.Fatalf("导入未整体保留拼接地址: %+v", result.Added)
 	}
-	// 普通 maccms api 地址仍应收敛到站点根，避免误判为拼接。
+	// 普通 maccms api 地址现保留完整采集端点（与新行为一致），且不误判为拼接。
 	result2, err := fresh.importCustomMaccmsSources(
 		`{"name":"api站","api":"https://plain.example.com/api.php/provide/vod/"}`)
 	if err != nil {
 		t.Fatalf("api 地址导入失败: %v", err)
 	}
-	if len(result2.Added) != 1 || result2.Added[0].Base != "https://plain.example.com" {
-		t.Fatalf("api 地址应收敛到根: %+v", result2.Added)
+	if len(result2.Added) != 1 || result2.Added[0].Base != "https://plain.example.com/api.php/provide/vod" {
+		t.Fatalf("api 地址应保留完整端点: %+v", result2.Added)
 	}
 }
 
@@ -341,7 +341,7 @@ func TestCustomSourceNoCountLimit(t *testing.T) {
 
 func TestCustomSourceExportNestedRuleNoEscapes(t *testing.T) {
 	engine := newCustomTestEngine(t)
-	if _, err := engine.addCustomMaccmsSource("规则站", "", xbpqCutRuleJSON); err != nil {
+	if _, err := engine.addCustomMaccmsSource("规则站", "", xbpqCutRuleJSON, ""); err != nil {
 		t.Fatalf("添加规则源失败: %v", err)
 	}
 	content, err := engine.exportCustomMaccmsSources()
